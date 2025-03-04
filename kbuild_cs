@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+#------------------------------------------------------------------------------
+#
+# File:         kbuild_cs
+#
+# Description:  Build script for CentOS Stream kernel.  Clones your fork of
+#               the CS9 kernel source repository, configures the kernel,
+#               builds for the specified architecture, and optionally sets
+#               up the workspace for backporting.
+#
+# Author:       Steve Dunnagan
+#               March 3, 2025
+#
+# These two environment variables should be set:
+# - KERNEL_SRC_DIR
+# - KERNEL_BUILD_DIR
+#
+# For example:
+# export KERNEL_SRC_DIR="/home/$USER/projects/cs9_kernel_5"
+# export KERNEL_BUILD_DIR="/home/$USER/projects/kbuild_cs_5"
+#
+# An empty KERNEL_BUILD_DIR implies not using a separate build dir.
+#
+# Examples:
+# ---------
+# Clone CS9 kernel source, configure, and build for x86_64:
+#   $ kbuild_cs -a x86_64 -g -f
+#
+# Same thing, but also prepare for backporting:
+#   $ kbuild_cs -a x86_64 -g -f -b
+#
+# Build for aarch64 (if on x86_64, cross compile) and prepare for backporting:
+#   $ kbuild_cs -a aarch64 -g -f -b
+#
+# Rebuild for aarch64:
+#   $ kbuild_cs -a aarch64
+#
+# Rebuild for aarch64 with clean:
+#   $ kbuild_cs -a aarch64 -c
+#------------------------------------------------------------------------------
+
+set -eu
+
+TARGET_ARCH="x86_64"
+CLEAN=false
+CONFIGURE=false
+CROSS_COMPILE_PREFIX=""
+GIT_CLONE=false
+KERNEL_ID="chopin"
+BUILD_SUCCESS=false
+BACKPORTING=false
+
+BLACK=$(tput setaf 0)
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+LIME_YELLOW=$(tput setaf 190)
+POWDER_BLUE=$(tput setaf 153)
+BLUE=$(tput setaf 4)
+MAGENTA=$(tput setaf 5)
+CYAN=$(tput setaf 6)
+WHITE=$(tput setaf 7)
+BRIGHT=$(tput bold)
+NORMAL=$(tput sgr0)
+BOLD=$(tput bold)
+BLINK=$(tput blink)
+REVERSE=$(tput smso)
+UNDERLINE=$(tput smul)
+
+# Process command line options.
+while getopts "a:bcfg" opt; do
+    case $opt in
+        a) TARGET_ARCH="$OPTARG" ;;
+        b) BACKPORTING=true ;;
+        c) CLEAN=true ;;
+        f) CONFIGURE=true ;;
+        g) GIT_CLONE=true ;;
+        *) echo "Usage: $0 [-a x86_64|aarch64|riscv64] [-g (git clone)] [-f (configure)] [-c (clean)] [-b (backporting)]" && exit 1 ;;
+    esac
+done
+
+# Ensure required environment variables are set.
+if [[ -z "$KERNEL_SRC_DIR" || -z "$KERNEL_BUILD_DIR" ]]; then
+    echo "${RED}${BOLD}"
+    echo "Error: KERNEL_SRC_DIR and KERNEL_BUILD_DIR not set."
+    echo "${NORMAL}"
+    exit 1
+else
+    echo "${WHITE}"
+    echo "KERNEL_SRC_DIR =   ${KERNEL_SRC_DIR}"
+    echo "KERNEL_BUILD_DIR = ${KERNEL_BUILD_DIR}"
+    echo "${NORMAL}"
+fi
+
+case "$TARGET_ARCH" in
+    aarch64)
+        MAKE_ARCH="arm64"
+        CROSS_COMPILE_PREFIX="aarch64-linux-gnu-"
+        ;;
+    riscv64)
+        MAKE_ARCH="riscv"
+        CROSS_COMPILE_PREFIX="riscv64-linux-gnu-"
+        ;;
+    x86_64)
+        MAKE_ARCH="x86_64"  # No cross-compilation needed
+        CROSS_COMPILE_PREFIX="aarch64-linux-gnu-"
+        ;;
+    *)
+        echo "Unsupported TARGET_ARCH: $TARGET_ARCH"
+        exit 1
+        ;;
+esac
+
+# Decide whether to cross compile based on the requested versus the running
+# target architecture.
+case "$TARGET_ARCH" in
+    aarch64)
+        MAKE_ARCH="arm64"
+        if [[ "$(uname -m)" != "aarch64" ]]; then
+            CROSS_COMPILE_PREFIX="aarch64-linux-gnu-"
+        else
+            CROSS_COMPILE_PREFIX=""
+        fi
+        ;;
+    riscv64)
+        MAKE_ARCH="riscv"
+        if [[ "$(uname -m)" != "riscv64" ]]; then
+            CROSS_COMPILE_PREFIX="riscv64-linux-gnu-"
+        else
+            CROSS_COMPILE_PREFIX=""
+        fi
+        ;;
+    x86_64)
+        if [[ "$(uname -m)" != "x86_64" ]]; then
+            echo "${RED}${BOLD}"
+            echo "Error: attempting to build for x86_64 on a non-x86_64 system."
+            echo "${NORMAL}"
+            exit 1
+        fi
+        MAKE_ARCH="x86_64"
+        CROSS_COMPILE_PREFIX=""
+        ;;
+    *)
+        echo "Unsupported target architecture: $TARGET_ARCH"
+        exit 1
+        ;;
+esac
+
+# Git clone the CS9 kernel source repository.
+if [[ "$GIT_CLONE" == true ]]; then
+    # Clone the CS9 kernel source.
+    if [[ ! -d "$KERNEL_SRC_DIR" ]]; then
+        git clone https://gitlab.com/$USER/centos-stream-9 "$KERNEL_SRC_DIR"
+    else
+        echo "Kernel source directory already exists. Skipping clone."
+    fi
+
+    cd "$KERNEL_SRC_DIR" || exit 1
+
+    # Build tags.
+    if [[ -x ~/bin/buildtags ]]; then
+        ~/bin/buildtags
+    else
+        echo "${RED}${BOLD}"
+        echo "Error: buildtags script not found in ~/bin."
+        echo "${NORMAL}"
+        exit 1
+    fi
+
+    # Set a build identifier.
+    sed -i "s/^\(EXTRAVERSION\s*=\s*\)\(.*\)/\1\2 -$KERNEL_ID/" Makefile
+
+    # Ignore clean option.
+    CLEAN=false
+
+    # Create build directory if specified.
+    if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+        mkdir -p "$KERNEL_BUILD_DIR"
+    fi
+fi
+
+# Configure the CS9 kernel.
+if $CONFIGURE; then
+    # Generate all CS9 kernel configs.
+    make dist-configs
+    CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}-debug.config"
+
+    # Copy a CS9 kernel config to use as a starting point.
+    cp "${CONFIG_FILE}" "${KERNEL_BUILD_DIR:-.}/.config"
+    echo "Using ${BLUE}${CONFIG_FILE}${NORMAL}"
+
+    # Perform mrproper if using a separate build directory.
+    if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+        make ARCH="$MAKE_ARCH" mrproper
+        echo "${WHITE}"
+        echo "Running make ARCH=$MAKE_ARCH mrproper..."
+        echo "${NORMAL}"
+    fi
+
+    # Validate and automatically update the CS9 kernel config.
+    if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+        make ARCH="$MAKE_ARCH" O="$KERNEL_BUILD_DIR" olddefconfig
+    else
+        make ARCH="$MAKE_ARCH" olddefconfig
+    fi
+
+    echo "${WHITE}"
+    echo "Running menuconfig..."
+    echo "${NORMAL}"
+    if [[ -n "$CROSS_COMPILE_PREFIX" ]]; then
+        # Cross-compile
+        if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+            # Separate build dir.
+            make ARCH="$MAKE_ARCH" CROSS_COMPILE="${CROSS_COMPILE_PREFIX}" O="$KERNEL_BUILD_DIR" menuconfig
+        else
+            make ARCH="$MAKE_ARCH" CROSS_COMPILE="${CROSS_COMPILE_PREFIX}" menuconfig
+        fi
+    else
+        # Native build
+        if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+            # Separate build dir.
+            make ARCH="$MAKE_ARCH" O="$KERNEL_BUILD_DIR" menuconfig
+        else
+            make ARCH="$MAKE_ARCH" menuconfig
+        fi
+    fi
+fi
+
+# If this is an Orin Nano, set for performance mode.
+if [[ $(cat /sys/firmware/devicetree/base/model) == *"Orin Nano"* ]]; then
+    echo "${WHITE}"
+    echo "This is Orin Nano - setting for performance mode."
+    echo "${NORMAL}"
+    sudo cpupower frequency-set -g performance
+fi
+
+GCC_VERSION=$(gcc --version | head -n 1)
+DATE=$(date)
+
+# Create a log file.
+mkdir -p ~/logs
+LOG_FILE=~/logs/cs9_kernel_build_$(date -d "today" +"%Y_%m%d_%H%M").log
+echo "//---------------------------------------------------------------" > ${LOG_FILE}
+echo "// CentOS Stream 9 Kernel Build" >> ${LOG_FILE}
+echo "// $DATE" >> ${LOG_FILE}
+echo "// KERNEL_SRC_DIR =   ${KERNEL_SRC_DIR}" >> ${LOG_FILE}
+echo "// KERNEL_BUILD_DIR = ${KERNEL_BUILD_DIR}" >> ${LOG_FILE}
+echo "// ${GCC_VERSION}" >> ${LOG_FILE}
+
+if $CONFIGURE; then
+echo "// CS9 kernel config file: ${CONFIG_FILE}"
+fi
+echo "//---------------------------------------------------------------" >> ${LOG_FILE}
+echo "" >> ${LOG_FILE}
+
+START_TIME=$(date +%s)
+
+cd "$KERNEL_SRC_DIR" || exit 1
+
+# Clean the build if requested.
+if [[ "$CLEAN" == true ]]; then
+    echo "${WHITE}"
+    echo "Cleaning the build..."
+    echo "${NORMAL}"
+    if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+        make O=$KERNEL_BUILD_DIR clean
+    else
+        make clean
+    fi
+fi  
+
+# Build the CS9 kernel.
+if [[ -n "$CROSS_COMPILE_PREFIX" ]]; then
+    # Cross compile.
+    MAKE_CMD="make -j$(($(nproc) - 1)) V=1 \
+        O=${KERNEL_BUILD_DIR:-.} \
+        ENABLE_WERROR= \
+        CROSS_COMPILE=\"${CROSS_COMPILE_PREFIX}\" \
+        ARCH=\"$MAKE_ARCH\""
+else
+    # Native build.
+    MAKE_CMD="make -j$(($(nproc) - 1)) V=1 \
+        O=${KERNEL_BUILD_DIR:-.} \
+        ENABLE_WERROR= \
+        ARCH=\"$MAKE_ARCH\""
+fi
+
+echo "Build command: ${MAKE_CMD}" | tee -a "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+eval "$MAKE_CMD" 2>&1 | tee -a "$LOG_FILE"
+
+END_TIME=$(date +%s)  # Capture end time
+BUILD_DURATION=$((END_TIME - START_TIME))  # Calculate duration
+BUILD_MINUTES=$((BUILD_DURATION / 60))  # Get minutes
+BUILD_SECONDS=$((BUILD_DURATION % 60))  # Get remaining seconds
+
+echo "" >> ${LOG_FILE}
+
+# Print the build result and time.
+echo "//---------------------------------------------------------------" >> ${LOG_FILE}
+if [[ -n "$CROSS_COMPILE_PREFIX" && "$TARGET_ARCH" == "aarch64" ]]; then
+    # Cross compiling for aarch64.
+    if [[ -f "$KERNEL_BUILD_DIR/arch/arm64/boot/Image" ]]; then
+        echo "${GREEN}${BOLD}"
+        echo "Build success"
+        echo "${NORMAL}"
+        echo "// Build success" >> ${LOG_FILE}
+        BUILD_SUCCESS=true
+    else
+        echo "${RED}${BOLD}"
+        echo "Build failed"
+        echo "${NORMAL}"
+        echo "// Build failed" >> ${LOG_FILE}
+    fi
+elif [[ -n "$CROSS_COMPILE_PREFIX" && "$TARGET_ARCH" == "riscv64" ]]; then
+    # Cross compiling for riscv64.
+    if [[ -f "$KERNEL_BUILD_DIR/arch/riscv64/boot/Image" ]]; then
+        echo "${GREEN}${BOLD}"
+        echo "Build success"
+        echo "${NORMAL}"
+        echo "// Build success" >> ${LOG_FILE}
+        BUILD_SUCCESS=true
+    else
+        echo "${RED}${BOLD}"
+        echo "Build failed"
+        echo "${NORMAL}"
+        echo "// Build failed" >> ${LOG_FILE}
+    fi
+else
+    # Native build on x86_64.
+    if [[ -f "$KERNEL_SRC_DIR/vmlinux" || -f "$KERNEL_BUILD_DIR/vmlinux" ]]; then
+        echo "${GREEN}${BOLD}"
+        echo "Build success"
+        echo "${NORMAL}"
+        echo "// Build success" >> ${LOG_FILE}
+        BUILD_SUCCESS=true
+    else
+        echo "${RED}${BOLD}"
+        echo "Build failed"
+        echo "${NORMAL}"
+        echo "// Build failed" >> ${LOG_FILE}
+    fi
+fi
+
+echo "${YELLOW}${BOLD}"
+echo "Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
+echo "${NORMAL}"
+echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec" >> "$LOG_FILE"
+
+# Add repositories for backporting if requested.
+if [[ "$BUILD_SUCCESS" == true && "$BACKPORTING" == true ]]; then
+    cd "$KERNEL_SRC_DIR"
+
+    # Add upstream "linux-stable" source repo if it doesn't exist
+    if ! git remote get-url linux-stable &>/dev/null; then
+        git remote add linux-stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
+    fi
+    git fetch linux-stable
+    git fetch --tags linux-stable
+
+    # Add CentOS Stream 9 kernel source repository if it doesn't exist
+    if ! git remote get-url cs9 &>/dev/null; then
+        git remote add cs9 https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9
+    fi
+    git fetch cs9
+    git fetch --tags cs9
+
+    echo ""
+    echo "// Setup complete for CS9 kernel backporting workspace." >> "$LOG_FILE"
+    echo "${GREEN}${BOLD}"
+    echo "Setup complete for CS9 kernel backporting workspace."
+    echo "${NORMAL}"
+fi
+
+echo "//---------------------------------------------------------------" >> ${LOG_FILE}
+
+# Indicate build success/failure to calling scripts.
+if [[ "$BUILD_SUCCESS" == true ]]; then
+    exit 0  # Success
+else
+    exit 1  # Failure
+fi
