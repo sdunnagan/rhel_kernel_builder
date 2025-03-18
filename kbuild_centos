@@ -1,54 +1,48 @@
 #!/usr/bin/env bash
 #------------------------------------------------------------------------------
 #
-# File:         kbuild_cs
+# File:         kbuild_centos
 #
-# Description:  Build script for CentOS Stream kernel.  Clones your fork of
-#               the CS9 kernel source repository, configures the kernel,
-#               builds for the specified architecture, and optionally sets
-#               up the workspace for backporting.
-#
-# Author:       Steve Dunnagan
-#               March 3, 2025
+# Description:  Build script for CentOS Stream kernel.
 #
 # These two environment variables should be set:
 # - KERNEL_SRC_DIR
 # - KERNEL_BUILD_DIR
 #
 # For example:
-# export KERNEL_SRC_DIR="/home/$USER/projects/cs9_kernel_5"
-# export KERNEL_BUILD_DIR="/home/$USER/projects/kbuild_cs_5"
+# export KERNEL_SRC_DIR="/home/$USER/projects/backports/cs9_kernel_2"
+# export KERNEL_BUILD_DIR="/home/$USER/projects/backports/build_cs9_kernel_2"
 #
 # An empty KERNEL_BUILD_DIR implies not using a separate build dir.
 #
 # Examples:
 # ---------
-# Clone CS9 kernel source, configure, and build for x86_64:
-#   $ kbuild_cs -a x86_64 -g -f
+# Clone CS9 kernel source for aarch64, apply patches, configure, and build.
+#   $ kbuild_centos -a aarch64 -g -p ~/patches -f
 #
-# Same thing, but also prepare for backporting:
-#   $ kbuild_cs -a x86_64 -g -f -b
+# Same thing, but also prepare workspace for backporting:
+#   $ kbuild_centos -a aarch64 -g -p ~/patches -f -b
 #
-# Build for aarch64 (if on x86_64, cross compile) and prepare for backporting:
-#   $ kbuild_cs -a aarch64 -g -f -b
+# Rebuild:
+#   $ kbuild_centos -a aarch64
 #
-# Rebuild for aarch64:
-#   $ kbuild_cs -a aarch64
+# Clean and build:
+#   $ kbuild_centos -a aarch64 -c
 #
-# Rebuild for aarch64 with clean:
-#   $ kbuild_cs -a aarch64 -c
+# Clean, configure and build:
+#   $ kbuild_centos -a aarch64 -c -f
 #------------------------------------------------------------------------------
 
 set -eu
 
 TARGET_ARCH="x86_64"
+BACKPORTING=false
 CLEAN=false
 CONFIGURE=false
-CROSS_COMPILE_PREFIX=""
 GIT_CLONE=false
+CROSS_COMPILE_PREFIX=""
 KERNEL_ID="chopin"
 BUILD_SUCCESS=false
-BACKPORTING=false
 
 BLACK=$(tput setaf 0)
 RED=$(tput setaf 1)
@@ -67,15 +61,27 @@ BLINK=$(tput blink)
 REVERSE=$(tput smso)
 UNDERLINE=$(tput smul)
 
+usage() {
+    echo "Usage: $0" \
+         "[-a x86_64|aarch64|riscv64]" \
+         "[-g (git clone)]" \
+         "[-f (configure)]" \
+         "[-c (clean)]" \
+         "[-b (backporting)]" \
+         "[-p <patches_dir> (specify patches directory)]"
+    exit 1
+}
+
 # Process command line options.
-while getopts "a:bcfg" opt; do
+while getopts "a:bcfgp:" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
         b) BACKPORTING=true ;;
         c) CLEAN=true ;;
         f) CONFIGURE=true ;;
         g) GIT_CLONE=true ;;
-        *) echo "Usage: $0 [-a x86_64|aarch64|riscv64] [-g (git clone)] [-f (configure)] [-c (clean)] [-b (backporting)]" && exit 1 ;;
+        p) PATCHES_DIR="$OPTARG" ;;
+        *) usage ;;
     esac
 done
 
@@ -87,32 +93,14 @@ if [[ -z "$KERNEL_SRC_DIR" || -z "$KERNEL_BUILD_DIR" ]]; then
     exit 1
 else
     echo "${WHITE}"
-    echo "KERNEL_SRC_DIR =   ${KERNEL_SRC_DIR}"
-    echo "KERNEL_BUILD_DIR = ${KERNEL_BUILD_DIR}"
+    echo "KERNEL_SRC_DIR =   ${POWDER_BLUE}${BOLD}${KERNEL_SRC_DIR}"
+    echo "${NORMAL}${WHITE}"
+    echo "KERNEL_BUILD_DIR = ${POWDER_BLUE}${BOLD}${KERNEL_BUILD_DIR}"
     echo "${NORMAL}"
 fi
 
-case "$TARGET_ARCH" in
-    aarch64)
-        MAKE_ARCH="arm64"
-        CROSS_COMPILE_PREFIX="aarch64-linux-gnu-"
-        ;;
-    riscv64)
-        MAKE_ARCH="riscv"
-        CROSS_COMPILE_PREFIX="riscv64-linux-gnu-"
-        ;;
-    x86_64)
-        MAKE_ARCH="x86_64"  # No cross-compilation needed
-        CROSS_COMPILE_PREFIX="aarch64-linux-gnu-"
-        ;;
-    *)
-        echo "Unsupported TARGET_ARCH: $TARGET_ARCH"
-        exit 1
-        ;;
-esac
-
-# Decide whether to cross compile based on the requested versus the running
-# target architecture.
+# Set the target architecture and cross-compilation prefix based on the
+# specified target architecture and the current system's architecture.
 case "$TARGET_ARCH" in
     aarch64)
         MAKE_ARCH="arm64"
@@ -146,32 +134,59 @@ case "$TARGET_ARCH" in
         ;;
 esac
 
-# Git clone the CS9 kernel source repository.
+# Clean the build.
+if [[ "$CLEAN" == true ]]; then
+    echo "${WHITE}"
+    echo "Cleaning the build..."
+    echo "${NORMAL}"
+    if [[ -n "$KERNEL_BUILD_DIR" ]]; then
+        #make O=$KERNEL_BUILD_DIR clean
+        rm -rf $KERNEL_BUILD_DIR
+    else
+        make clean
+    fi
+fi
+
+# Create the kernel build dir if it doesn't exist yet.
+if [ ! -d "$KERNEL_BUILD_DIR" ]; then
+    mkdir -p "$KERNEL_BUILD_DIR"
+fi
+
+# Clone the CS9 kernel source repository.
 if [[ "$GIT_CLONE" == true ]]; then
+    # Remove the current kernel source dir if it exists.
+    if [ -d "$KERNEL_SRC_DIR" ]; then
+        echo "${YELLOW}${BOLD}"
+        echo "WARNING: The kernel source directory ($KERNEL_SRC_DIR) exists."
+        read -p "Are you sure you want to remove the existing workspace? This action is irreversible. Type 'yes' to confirm: ${NORMAL}" confirmation
+        echo "${NORMAL}"
+        if [[ "$confirmation" == "yes" ]]; then
+            echo "${WHITE}Removing ${POWDER_BLUE}${BOLD}$KERNEL_SRC_DIR${NORMAL}..."
+            echo "${WHITE}Removing ${POWDER_BLUE}${BOLD}$KERNEL_BUILD_DIR${NORMAL}..."
+            rm -rf "$KERNEL_SRC_DIR"
+            rm -rf "$KERNEL_BUILD_DIR"
+            echo ""
+        else
+            echo "${WHITE}"
+            echo "Workspace was not removed. Please reconsider your life choices."
+            echo "${NORMAL}"
+            exit 1
+        fi
+    fi
+
     # Clone the CS9 kernel source.
     if [[ ! -d "$KERNEL_SRC_DIR" ]]; then
-        git clone https://gitlab.com/$USER/centos-stream-9 "$KERNEL_SRC_DIR"
-    else
-        echo "Kernel source directory already exists. Skipping clone."
-    fi
-
-    cd "$KERNEL_SRC_DIR" || exit 1
-
-    # Build tags.
-    if [[ -x ~/bin/buildtags ]]; then
-        ~/bin/buildtags
-    else
-        echo "${RED}${BOLD}"
-        echo "Error: buildtags script not found in ~/bin."
+        echo "${WHITE}"
+        echo "Cloning the CS9 kernel source tree..."
         echo "${NORMAL}"
-        exit 1
+        git clone https://gitlab.com/$USER/centos-stream-9 "$KERNEL_SRC_DIR"
     fi
+
+    # Change dir to the newly cloned kernel source.
+    cd "$KERNEL_SRC_DIR" || exit 1
 
     # Set a build identifier.
     sed -i "s/^\(EXTRAVERSION\s*=\s*\)\(.*\)/\1\2 -$KERNEL_ID/" Makefile
-
-    # Ignore clean option.
-    CLEAN=false
 
     # Create build directory if specified.
     if [[ -n "$KERNEL_BUILD_DIR" ]]; then
@@ -179,15 +194,68 @@ if [[ "$GIT_CLONE" == true ]]; then
     fi
 fi
 
+# Check if KERNEL_SRC_DIR exists, and change to it if it does.
+if [ -d "$KERNEL_SRC_DIR" ]; then
+    cd "$KERNEL_SRC_DIR" || exit 1
+else
+    echo "${RED}${BOLD}"
+    echo "Error: KERNEL_SRC_DIR ($KERNEL_SRC_DIR) does not exist."
+    echo "${NORMAL}"
+    exit 1
+fi
+
+# Apply patches
+if [[ -d "$PATCHES_DIR" ]]; then
+    echo ""
+    echo "${WHITE}Applying patches from ${POWDER_BLUE}${BOLD}$PATCHES_DIR${NORMAL}..."
+    echo ""
+
+    # Loop through each patch file in the directory
+    for patch_file in "$PATCHES_DIR"/*.patch; do
+        if [[ -f "$patch_file" ]]; then
+            echo "${POWDER_BLUE}${BOLD}$patch_file${NORMAL}"
+            git am "$patch_file" || {
+                echo "${RED}${BOLD}Error: Failed to apply patch ${POWDER_BLUE}${BOLD}$patch_file${NORMAL}"
+                exit 1
+            }
+        else
+            echo "${RED}${BOLD}"
+            echo "Error: No patches found in $PATCHES_DIR"
+            echo "${NORMAL}"
+            exit 1
+        fi
+    done
+fi
+
+# Build ctags
+echo "${WHITE}"
+echo "Generating ctags ..."
+echo "${NORMAL}"
+ctags --append=yes --sort=yes --recurse --links=no --languages=C,C++,Python \
+      --c-kinds=+p --fields=+iaS --extras=+q \
+      --exclude="*.o" --exclude="*.so" --exclude="*.a" --exclude="*.bin" \
+      --exclude=".git/*"
+if [ "$?" -ne 0 ]; then
+    echo "${RED}${BOLD}"
+    echo "Error: Failed to generate tags" >&2
+    echo "${NORMAL}"
+    exit 1
+fi
+
 # Configure the CS9 kernel.
 if $CONFIGURE; then
     # Generate all CS9 kernel configs.
+    echo "${WHITE}"
+    echo "Generating all CS9 kernel configs..."
+    echo "${NORMAL}"
     make dist-configs
     CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}-debug.config"
 
     # Copy a CS9 kernel config to use as a starting point.
     cp "${CONFIG_FILE}" "${KERNEL_BUILD_DIR:-.}/.config"
-    echo "Using ${BLUE}${CONFIG_FILE}${NORMAL}"
+    echo "${WHITE}"
+    echo "CentOS Stream 9 kernel config ${POWDER_BLUE}${BOLD}${CONFIG_FILE}"
+    echo "${NORMAL}"
 
     # Perform mrproper if using a separate build directory.
     if [[ -n "$KERNEL_BUILD_DIR" ]]; then
@@ -198,6 +266,9 @@ if $CONFIGURE; then
     fi
 
     # Validate and automatically update the CS9 kernel config.
+    echo "${WHITE}"
+    echo "Running olddefconfig..."
+    echo "${NORMAL}"
     if [[ -n "$KERNEL_BUILD_DIR" ]]; then
         make ARCH="$MAKE_ARCH" O="$KERNEL_BUILD_DIR" olddefconfig
     else
@@ -239,7 +310,7 @@ DATE=$(date)
 
 # Create a log file.
 mkdir -p ~/logs
-LOG_FILE=~/logs/cs9_kernel_build_$(date -d "today" +"%Y_%m%d_%H%M").log
+LOG_FILE=~/logs/cs9_kernel_build_$(date -d "today" +"%Y_%m_%d_%H%M").log
 echo "//---------------------------------------------------------------" > ${LOG_FILE}
 echo "// CentOS Stream 9 Kernel Build" >> ${LOG_FILE}
 echo "// $DATE" >> ${LOG_FILE}
@@ -257,19 +328,10 @@ START_TIME=$(date +%s)
 
 cd "$KERNEL_SRC_DIR" || exit 1
 
-# Clean the build if requested.
-if [[ "$CLEAN" == true ]]; then
-    echo "${WHITE}"
-    echo "Cleaning the build..."
-    echo "${NORMAL}"
-    if [[ -n "$KERNEL_BUILD_DIR" ]]; then
-        make O=$KERNEL_BUILD_DIR clean
-    else
-        make clean
-    fi
-fi  
-
 # Build the CS9 kernel.
+echo "${WHITE}"
+echo "Building the CS9 kernel..."
+echo "${NORMAL}"
 if [[ -n "$CROSS_COMPILE_PREFIX" ]]; then
     # Cross compile.
     MAKE_CMD="make -j$(($(nproc) - 1)) V=1 \
@@ -342,7 +404,7 @@ else
     fi
 fi
 
-echo "${YELLOW}${BOLD}"
+echo "${WHITE}"
 echo "Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
 echo "${NORMAL}"
 echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec" >> "$LOG_FILE"
