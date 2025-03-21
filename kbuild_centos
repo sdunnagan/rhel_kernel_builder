@@ -5,6 +5,9 @@
 #
 # Description:  Build script for CentOS Stream kernel.
 #
+# Author:       Steve Dunnagan
+#               March 19, 2025
+#
 # These two environment variables should be set:
 # - KERNEL_SRC_DIR
 # - KERNEL_BUILD_DIR
@@ -42,8 +45,8 @@ CONFIGURE=false
 GIT_CLONE=false
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
-BUILD_SUCCESS=false
 PATCHES_DIR=""
+BUILD_SUCCESS=false
 
 BLACK=$(tput setaf 0)
 RED=$(tput setaf 1)
@@ -104,8 +107,7 @@ command -v make >/dev/null 2>&1 || { echo "make is required but not installed. E
 command -v ctags >/dev/null 2>&1 || { echo "ctags is required but not installed. Exiting."; exit 1; }
 command -v cpupower >/dev/null 2>&1 || { echo "cpupower is required but not installed. Exiting."; exit 1; }
 
-# Set the target architecture and cross-compilation prefix based on the
-# specified target architecture and the current system's architecture.
+# Set the target architecture.
 case "$TARGET_ARCH" in
     aarch64)
         MAKE_ARCH="arm64"
@@ -147,12 +149,10 @@ if [[ "$CLEAN" == true ]]; then
     rm -rf "${KERNEL_BUILD_DIR}"
 fi
 
-# Ensure KERNEL_BUILD_DIR exists
+# Ensure KERNEL_BUILD_DIR exists and is writable.
 if [[ ! -d "$KERNEL_BUILD_DIR" ]]; then
     mkdir -p "$KERNEL_BUILD_DIR"
 fi
-
-# Ensure KERNEL_BUILD_DIR is writable
 if [[ ! -w "$KERNEL_BUILD_DIR" ]]; then
     echo "Error: KERNEL_BUILD_DIR is not writable: $KERNEL_BUILD_DIR"
     exit 1
@@ -280,10 +280,10 @@ if $CONFIGURE; then
 
     # Run menuconfig so user can customize the kernel config.
     echo ""
-    echo "${WHITE}Do you want to run menuconfig? (yes/no)${NORMAL}"
-    read -r answer
-    answer="${answer:-no}"  # Default to "no" if no input is provided
-    if [[ "$answer" =~ ^[Yy](es)?$ ]]; then
+    read -p "${WHITE}Do you want to run menuconfig? Type 'yes' to confirm: ${NORMAL}" menuconfig_answer
+    menuconfig_answer="${menuconfig_answer:-no}" # Default to 'no'
+    echo "${NORMAL}"
+    if [[ "$menuconfig_answer" == "yes" ]]; then
         if [[ -n "$CROSS_COMPILE_PREFIX" ]]; then
             # Cross-compile
             if [[ -n "$KERNEL_BUILD_DIR" ]]; then
@@ -294,7 +294,7 @@ if $CONFIGURE; then
             if [[ -n "$KERNEL_BUILD_DIR" ]]; then
                 make ARCH="$MAKE_ARCH" O="$KERNEL_BUILD_DIR" menuconfig
             fi
-        fi  
+        fi
     else
         echo "${WHITE}Skipping menuconfig.${NORMAL}"
     fi
@@ -330,20 +330,25 @@ START_TIME=$(date +%s)
 
 cd "$KERNEL_SRC_DIR" || exit 1
 
+# Remove any prior kernel images, since those are used to check build success.
+rm -f $KERNEL_BUILD_DIR/arch/arm64/boot/Image
+rm -f $KERNEL_BUILD_DIR/arch/riscv/boot/Image
+rm -f $KERNEL_BUILD_DIR/vmlinux
+
 # Build the CS9 kernel.
 echo ""
 echo "${WHITE}Building the CS9 kernel..."
 echo "${NORMAL}"
 if [[ -n "$CROSS_COMPILE_PREFIX" ]]; then
     # Cross compile.
-    MAKE_CMD="make -j$(($(nproc) - 1)) V=1 \
+    MAKE_CMD="make -j$(($(nproc) - 1)) \
         O=${KERNEL_BUILD_DIR:-.} \
         ENABLE_WERROR= \
         CROSS_COMPILE=\"${CROSS_COMPILE_PREFIX}\" \
         ARCH=\"$MAKE_ARCH\""
 else
     # Native build.
-    MAKE_CMD="make -j$(($(nproc) - 1)) V=1 \
+    MAKE_CMD="make -j$(($(nproc) - 1)) \
         O=${KERNEL_BUILD_DIR:-.} \
         ENABLE_WERROR= \
         ARCH=\"$MAKE_ARCH\""
@@ -355,6 +360,7 @@ echo "${NORMAL}"
 echo "Build command: ${MAKE_CMD}" >> "$LOG_FILE"
 echo "" >> "$LOG_FILE"
 eval "$MAKE_CMD" 2>&1 | tee -a "$LOG_FILE"
+BUILD_EXIT_STATUS=${PIPESTATUS[0]}  # Capture exit status
 
 END_TIME=$(date +%s)  # Capture end time
 BUILD_DURATION=$((END_TIME - START_TIME))  # Calculate duration
@@ -362,52 +368,38 @@ BUILD_MINUTES=$((BUILD_DURATION / 60))  # Get minutes
 BUILD_SECONDS=$((BUILD_DURATION % 60))  # Get remaining seconds
 
 echo "" >> ${LOG_FILE}
-
-# Print the build result and time.
 echo "//---------------------------------------------------------------" >> ${LOG_FILE}
-if [[ -n "$CROSS_COMPILE_PREFIX" && "$TARGET_ARCH" == "aarch64" ]]; then
-    # Cross compiling for aarch64.
-    if [[ -f "$KERNEL_BUILD_DIR/arch/arm64/boot/Image" ]]; then
-        echo "${GREEN}${BOLD}"
-        echo "Build success"
-        echo "${NORMAL}"
-        echo "// Build success" >> ${LOG_FILE}
-        BUILD_SUCCESS=true
-    else
-        echo "${RED}${BOLD}"
-        echo "Build failed"
-        echo "${NORMAL}"
-        echo "// Build failed" >> ${LOG_FILE}
-    fi
-elif [[ -n "$CROSS_COMPILE_PREFIX" && "$TARGET_ARCH" == "riscv64" ]]; then
-    # Cross compiling for riscv64.
-    if [[ -f "$KERNEL_BUILD_DIR/arch/riscv64/boot/Image" ]]; then
-        echo "${GREEN}${BOLD}"
-        echo "Build success"
-        echo "${NORMAL}"
-        echo "// Build success" >> ${LOG_FILE}
-        BUILD_SUCCESS=true
-    else
-        echo "${RED}${BOLD}"
-        echo "Build failed"
-        echo "${NORMAL}"
-        echo "// Build failed" >> ${LOG_FILE}
-    fi
-else
-    # Native build on x86_64.
-    if [[ -f "$KERNEL_SRC_DIR/vmlinux" || -f "$KERNEL_BUILD_DIR/vmlinux" ]]; then
-        echo "${GREEN}${BOLD}"
-        echo "Build success"
-        echo "${NORMAL}"
-        echo "// Build success" >> ${LOG_FILE}
-        BUILD_SUCCESS=true
-    else
-        echo "${RED}${BOLD}"
-        echo "Build failed"
-        echo "${NORMAL}"
-        echo "// Build failed" >> ${LOG_FILE}
-    fi
-fi
+
+# Check for build success/failure.
+case "$TARGET_ARCH" in
+    aarch64)
+        IMAGE_FILE="$KERNEL_BUILD_DIR/arch/arm64/boot/Image"
+        if [[ $BUILD_EXIT_STATUS -eq 0 && -f "$IMAGE_FILE" ]]; then
+            echo "${GREEN}${BOLD}Build success${NORMAL}"
+            BUILD_SUCCESS=true
+        else
+            echo "${RED}${BOLD}Build failed${NORMAL}"
+        fi
+        ;;
+    riscv64)
+        IMAGE_FILE="$KERNEL_BUILD_DIR/arch/riscv/boot/Image"
+        if [[ $BUILD_EXIT_STATUS -eq 0 && -f "$IMAGE_FILE" ]]; then
+            echo "${GREEN}${BOLD}Build success${NORMAL}"
+            BUILD_SUCCESS=true
+        else
+            echo "${RED}${BOLD}Build failed${NORMAL}"
+        fi
+        ;;
+    x86_64)
+        VMLINUX_FILE="$KERNEL_BUILD_DIR/vmlinux"
+        if [[ $BUILD_EXIT_STATUS -eq 0 && (-f "$VMLINUX_FILE" || -f "$KERNEL_SRC_DIR/vmlinux") ]]; then
+            echo "${GREEN}${BOLD}Build success${NORMAL}"
+            BUILD_SUCCESS=true
+        else
+            echo "${RED}${BOLD}Build failed${NORMAL}"
+        fi
+        ;;
+esac
 
 echo "${WHITE}Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
 echo "${NORMAL}"
@@ -415,6 +407,10 @@ echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec" >> "$LOG_FILE"
 
 # Add repositories for backporting if requested.
 if [[ "$BUILD_SUCCESS" == true && "$BACKPORTING" == true ]]; then
+    echo ""
+    echo "${WHITE}Adding repositories for backporting...${BRIGHT_BLUE}${BOLD}$PATCHES_DIR..."
+    echo "${NORMAL}"
+
     cd "$KERNEL_SRC_DIR"
 
     # Add upstream "linux-stable" source repo if it doesn't exist
