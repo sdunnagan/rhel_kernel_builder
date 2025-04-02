@@ -5,9 +5,6 @@
 #
 # Description:  Build script for CentOS Stream kernel.
 #
-# Author:       Steve Dunnagan
-#               March 19, 2025
-#
 # These two environment variables should be set:
 # - KERNEL_SRC_DIR
 # - KERNEL_BUILD_DIR
@@ -20,10 +17,10 @@
 #
 # Examples:
 # ---------
-# Clone CS9 kernel source for aarch64, apply patches, configure, and build.
-#   $ kbuild_centos -a aarch64 -g -p ~/patches -f
+# Clone CS9 kernel source repository for aarch64, configure, and build.
+#   $ kbuild_centos -a aarch64 -g -f
 #
-# Same thing, but also prepare workspace for backporting:
+# Same thing, but also apply patches and prepare workspace for backporting:
 #   $ kbuild_centos -a aarch64 -g -p ~/patches -f -b
 #
 # Rebuild:
@@ -91,7 +88,7 @@ while getopts "a:bcfgp:" opt; do
 done
 
 # Ensure required environment variables are set.
-if [[ -z "$KERNEL_SRC_DIR" || -z "$KERNEL_BUILD_DIR" ]]; then
+if [[ -z "$KERNEL_SRC_DIR" || -z "${KERNEL_BUILD_DIR}" ]]; then
     echo "${RED}${BOLD}"
     echo "Error: KERNEL_SRC_DIR and KERNEL_BUILD_DIR not set."
     echo "${NORMAL}"
@@ -313,7 +310,7 @@ DATE=$(date)
 # Create a log file.
 mkdir -p ~/logs
 LOG_FILE=~/logs/cs9_kernel_build_$(date -d "today" +"%Y_%m_%d_%H%M").log
-echo "//---------------------------------------------------------------" > ${LOG_FILE}
+echo "//---------------------------------------------------------------" > "${LOG_FILE}"
 echo "// CentOS Stream 9 Kernel Build" >> ${LOG_FILE}
 echo "// $DATE" >> ${LOG_FILE}
 echo "// KERNEL_SRC_DIR =   ${KERNEL_SRC_DIR}" >> ${LOG_FILE}
@@ -323,8 +320,8 @@ echo "// ${GCC_VERSION}" >> ${LOG_FILE}
 if $CONFIGURE; then
 echo "// CS9 kernel config file: ${CONFIG_FILE}" >> ${LOG_FILE}
 fi
-echo "//---------------------------------------------------------------" >> ${LOG_FILE}
-echo "" >> ${LOG_FILE}
+echo "//---------------------------------------------------------------" >> "${LOG_FILE}"
+echo "" >> "${LOG_FILE}"
 
 START_TIME=$(date +%s)
 
@@ -341,14 +338,14 @@ echo "${WHITE}Building the CS9 kernel..."
 echo "${NORMAL}"
 if [[ -n "$CROSS_COMPILE_PREFIX" ]]; then
     # Cross compile.
-    MAKE_CMD="make -j$(($(nproc) - 1)) \
+    MAKE_CMD="make -j$(nproc) \
         O=${KERNEL_BUILD_DIR:-.} \
         ENABLE_WERROR= \
         CROSS_COMPILE=\"${CROSS_COMPILE_PREFIX}\" \
         ARCH=\"$MAKE_ARCH\""
 else
     # Native build.
-    MAKE_CMD="make -j$(($(nproc) - 1)) \
+    MAKE_CMD="make -j$(nproc) \
         O=${KERNEL_BUILD_DIR:-.} \
         ENABLE_WERROR= \
         ARCH=\"$MAKE_ARCH\""
@@ -367,8 +364,8 @@ BUILD_DURATION=$((END_TIME - START_TIME))  # Calculate duration
 BUILD_MINUTES=$((BUILD_DURATION / 60))  # Get minutes
 BUILD_SECONDS=$((BUILD_DURATION % 60))  # Get remaining seconds
 
-echo "" >> ${LOG_FILE}
-echo "//---------------------------------------------------------------" >> ${LOG_FILE}
+echo "" >> "${LOG_FILE}"
+echo "//---------------------------------------------------------------" >> "${LOG_FILE}"
 
 # Check for build success/failure.
 case "$TARGET_ARCH" in
@@ -403,38 +400,38 @@ esac
 
 echo "${WHITE}Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
 echo "${NORMAL}"
-echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec" >> "$LOG_FILE"
+echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec" >> "${LOG_FILE}"
 
 # Add repositories for backporting if requested.
 if [[ "$BUILD_SUCCESS" == true && "$BACKPORTING" == true ]]; then
     echo ""
-    echo "${WHITE}Adding repositories for backporting...${BRIGHT_BLUE}${BOLD}$PATCHES_DIR..."
+    echo "${WHITE}Adding repositories for backporting...${BRIGHT_BLUE}${BOLD}"
     echo "${NORMAL}"
 
     cd "$KERNEL_SRC_DIR"
 
     # Add upstream "linux-stable" source repo if it doesn't exist
-    if ! git remote get-url linux-stable &>/dev/null; then
+    if ! git remote get-url linux-stable > /dev/null 2>&1; then
         git remote add linux-stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
     fi
-    git fetch linux-stable
-    git fetch --tags linux-stable
+    git fetch -q linux-stable
+    git fetch -q --tags linux-stable
 
     # Add CentOS Stream 9 kernel source repository if it doesn't exist
-    if ! git remote get-url cs9 &>/dev/null; then
+    if ! git remote get-url cs9 > /dev/null 2>&1; then
         git remote add cs9 https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9
     fi
-    git fetch cs9
-    git fetch --tags cs9
+    git fetch -q cs9
+    git fetch -q --tags cs9
 
     echo ""
-    echo "// Setup complete for CS9 kernel backporting workspace." >> "$LOG_FILE"
+    echo "// Setup complete for CS9 kernel backporting workspace." >> "${LOG_FILE}"
     echo "${GREEN}${BOLD}"
-    echo "Setup complete for CS9 kernel backporting workspace."
+    echo "CS9 kernel workspace set up for backporting."
     echo "${NORMAL}"
 fi
 
-echo "//---------------------------------------------------------------" >> ${LOG_FILE}
+echo "//---------------------------------------------------------------" >> "${LOG_FILE}"
 
 # Indicate build success/failure to calling scripts.
 if [[ "$BUILD_SUCCESS" == true ]]; then
