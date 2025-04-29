@@ -9,28 +9,27 @@
 # - KERNEL_SRC_DIR
 # - KERNEL_BUILD_DIR
 #
-# Examples:
-# ---------
-# Clone the CS9 kernel repo, add repositories needed for backporting,
-# configure, and build the kernel:
-#   $ kbuild_centos -r cs9 -a aarch64 -g -b -f
+# Example:
+# Clone the CS9 kernel repo, add repositories for backporting, configure, and
+# build a debug kernel:
+#   $ kbuild_centos -r cs9 -a aarch64 -g -b -f -d
 #
-# Same thing, but also apply patches:
-#   $ kbuild_centos -r cs9 -a aarch64 -g -b -f -p ~/patches
-#
-# Rebuild:
-#   $ kbuild_centos -r cs9 -a aarch64
+# NOTE:
+# Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
 #------------------------------------------------------------------------------
 
 set -eu
 
-TARGET_ARCH="x86_64"
+BACKPORTING=false
+DEBUG_KERNEL=false
 CONFIGURE=false
 CONFIG_FILE="none"
-BACKPORTING=false
-REPOSITORY="cs9"
 GIT_CLONE=false
 MENUCONFIG=false
+REPOSITORY="cs9"
+RT_KERNEL=false
+TARGET_ARCH="x86_64"
+
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
 PATCHES_DIR=""
@@ -61,18 +60,20 @@ usage()
     echo "Options:"
     echo "  -a <x86_64|aarch64|riscv64>   Architecture"
     echo "  -b                            Set up for backporting"
+    echo "  -d                            DEBUG kernel"
     echo "  -f                            Configure kernel (implies clean)"
     echo "  -g                            Git clone"
     echo "  -h                            Show help"
     echo "  -m                            Run menuconfig"
     echo "  -p <patches_dir>              Patches directory"
     echo "  -r <cs9|cs10>                 CentOS Stream kernel repo"
+    echo "  -t                            RT kernel"
     echo ""
     exit 1
 }
 
-set_custom_kernel_configs()
-{
+set_my_kernel_configs()
+{ 
     # Disable treating warnings as errors
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable WERROR
 
@@ -82,6 +83,10 @@ set_custom_kernel_configs()
     # Disable BTF (eBPF debugging and tracing)
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable DEBUG_INFO_BTF
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable DEBUG_INFO_BTF_MODULES
+
+    # Disable enforcement of module signing
+    "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable MODULE_SIG_ALL
+    "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable MODULE_SIG_FORCE
 }
 
 create_log_file()
@@ -211,7 +216,7 @@ set_target_architecture() {
                 CROSS_COMPILE_PREFIX="riscv64-linux-gnu-"
             else
                 CROSS_COMPILE_PREFIX=""
-            fi  
+            fi
             ;;  
         x86_64) 
             if [[ "$(uname -m)" != "x86_64" ]]; then
@@ -223,7 +228,7 @@ set_target_architecture() {
             MAKE_ARCH="x86_64"
             CROSS_COMPILE_PREFIX=""
             ;;
-        *)
+        *) 
             echo "${RED}${BOLD}Invalid architecture specified: $TARGET_ARCH. Supported: aarch64, riscv64, x86_64."
             echo "${NORMAL}"
             exit 1
@@ -321,25 +326,14 @@ clone_kernel_repos()
     fi
 }
 
-configure_kernel()
+set_config_file()
 {
-    # Recreate the build dir.
-    echo "${WHITE}Cleaning the build directory..."
-    echo "${NORMAL}"
-    rm -rf "${KERNEL_BUILD_DIR}"; sync
-    mkdir -p "${KERNEL_BUILD_DIR}"
-
-    echo "${WHITE}Generating kernel configs..."
-    echo "${NORMAL}"
-    make dist-configs > /dev/null 2>&1
-
-    # Determine the kernel config file.
     case "${REPOSITORY}" in
         cs9)
-            CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}-debug.config"
+            CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}"
             ;;
         cs10)
-            CONFIG_FILE="redhat/configs/kernel-6.12.0-${TARGET_ARCH}-debug.config"
+            CONFIG_FILE="redhat/configs/kernel-6.12.0-${TARGET_ARCH}"
             ;;
         *)
             echo "${RED}${BOLD}"
@@ -349,6 +343,32 @@ configure_kernel()
             ;;
     esac
 
+    # Append -rt if RT_KERNEL is set to true
+    if [ "${RT_KERNEL}" = "true" ]; then
+        CONFIG_FILE="${CONFIG_FILE}-rt"
+    fi
+
+    # Append -debug if DEBUG_KERNEL is set to true
+    if [ "${DEBUG_KERNEL}" = "true" ]; then
+        CONFIG_FILE="${CONFIG_FILE}-debug"
+    fi
+
+    CONFIG_FILE="${CONFIG_FILE}.config"
+}
+
+configure_kernel()
+{
+    echo "${WHITE}Cleaning the build directory..."
+    echo "${NORMAL}"
+    rm -rf "${KERNEL_BUILD_DIR}"; sync
+    mkdir -p "${KERNEL_BUILD_DIR}"
+
+    echo "${WHITE}Generating kernel configs..."
+    echo "${NORMAL}"
+    make dist-configs > /dev/null 2>&1
+
+    set_config_file
+
     # Copy the kernel config file to .config in the build directory.
     cp "${CONFIG_FILE}" "${KERNEL_BUILD_DIR}/.config"
     echo "${WHITE}CentOS Stream kernel config: ${BRIGHT_BLUE}${BOLD}${CONFIG_FILE}"
@@ -357,7 +377,7 @@ configure_kernel()
     # Set my usual kernel configs.
     echo "${WHITE}Set my usual kernel configs ..."
     echo "${NORMAL}"
-    set_custom_kernel_configs
+    set_my_kernel_configs
 
     # Clean the kernel source tree.
     echo "${WHITE}Cleaning the source tree..."
@@ -393,6 +413,9 @@ build_kernel()
 
     echo "Log file: ${CYAN}${LOG_FILE}"
     echo "${NORMAL}"
+
+    # Set identifier for this custom kernel build.
+    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "$KERNEL_SRC_DIR/Makefile"
 
     if [[ -n "${CROSS_COMPILE_PREFIX}" ]]; then
         MAKE_CMD="make -j$(nproc) O=${KERNEL_BUILD_DIR} ENABLE_WERROR= CROSS_COMPILE=${CROSS_COMPILE_PREFIX} ARCH=${MAKE_ARCH}"
@@ -448,16 +471,18 @@ build_kernel()
 }
 
 # Process command line options.
-while getopts "a:bfghmp:r:" opt; do
+while getopts "a:bdfghmp:r:t" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
         b) BACKPORTING=true ;;
+        d) DEBUG_KERNEL=true ;;
         f) CONFIGURE=true ;;
         g) GIT_CLONE=true ;;
         h) usage; exit ;;
         m) MENUCONFIG=true ;;
         p) PATCHES_DIR="$OPTARG" ;;
         r) REPOSITORY="$OPTARG" ;;
+        t) RT_KERNEL=true ;;
         \?) usage; exit 1 ;;
     esac
 done
@@ -520,7 +545,7 @@ fi
 
 # If this is an Orin Nano, set for performance mode.
 if grep -q "Orin Nano" /sys/firmware/devicetree/base/model; then
-    echo "${WHITE}This is Orin Nano - setting for performance mode."
+    echo "${WHITE}Setting for performance mode on Orin Nano..."
     echo "${NORMAL}"
     sudo cpupower frequency-set -g performance > /dev/null 2>&1
 fi
