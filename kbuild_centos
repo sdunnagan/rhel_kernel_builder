@@ -10,9 +10,8 @@
 # - KERNEL_BUILD_DIR
 #
 # Example:
-# Clone the CS9 kernel repo, add repositories for backporting, configure, and
-# build a debug kernel:
-#   $ kbuild_centos -r cs9 -a aarch64 -g -b -f -d
+# Clone the CS9 kernel repo, configure, and build a debug kernel:
+#   $ kbuild_centos -v cs9 -a aarch64 -g -b -f -r -d
 #
 # NOTE:
 # Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
@@ -26,9 +25,11 @@ CONFIGURE=false
 CONFIG_FILE="none"
 GIT_CLONE=false
 MENUCONFIG=false
-REPOSITORY="cs9"
+VERSION_OF_CENTOS_STREAM_KERNEL="cs9"
 RT_KERNEL=false
 TARGET_ARCH="x86_64"
+BUILD_RPM_PACKAGES=false
+USERNAME=sdunnaga
 
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
@@ -66,8 +67,9 @@ usage()
     echo "  -h                            Show help"
     echo "  -m                            Run menuconfig"
     echo "  -p <patches_dir>              Patches directory"
-    echo "  -r <cs9|cs10>                 CentOS Stream kernel repo"
+    echo "  -r                            Build RPM packages"
     echo "  -t                            RT kernel"
+    echo "  -v <cs9|cs10>                 Major version of CentOS Stream kernel"
     echo ""
     exit 1
 }
@@ -101,17 +103,17 @@ create_log_file()
     TIMESTAMP=$(date -d "today" +"%Y_%m_%d_%H%M")
 
     mkdir -p ~/logs
-    LOG_FILE=~/logs/${REPOSITORY}_kernel_build_${TIMESTAMP}.log
+    LOG_FILE=~/logs/${VERSION_OF_CENTOS_STREAM_KERNEL}_kernel_build_${TIMESTAMP}.log
 
     {
         echo "//---------------------------------------------------------------"
-        echo "// ${REPOSITORY^^} Kernel Build"
+        echo "// ${VERSION_OF_CENTOS_STREAM_KERNEL^^} Kernel Build"
         echo "// ${DATE_STR}"
         echo "// KERNEL_SRC_DIR =   ${KERNEL_SRC_DIR}"
         echo "// KERNEL_BUILD_DIR = ${KERNEL_BUILD_DIR}"
         echo "// ${GCC_VERSION}"
         if [[ ${CONFIGURE} == "true" ]]; then
-            echo "// ${REPOSITORY^^} kernel config file: ${CONFIG_FILE}"
+            echo "// ${VERSION_OF_CENTOS_STREAM_KERNEL^^} kernel config file: ${CONFIG_FILE}"
         fi
         echo "//---------------------------------------------------------------"
         echo ""
@@ -258,7 +260,7 @@ add_remotes_for_backporting()
     git fetch -q --tags linux-stable
 
     # Add the specified CentOS Stream kernel repository.
-    case "${REPOSITORY}" in
+    case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
         cs9)
             git remote add cs9 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9"
             git fetch -q cs9
@@ -301,16 +303,22 @@ clone_kernel_repos()
     fi
 
     # Clone the specified CentOS Stream kernel source repository.
-    case "${REPOSITORY}" in
+    case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
         cs9)
             echo "${WHITE}Cloning the CS9 kernel source tree..."
             echo "${NORMAL}"
-            git clone "https://gitlab.com/${USER}/centos-stream-9.git" "${KERNEL_SRC_DIR}" > /dev/null 2>&1
+            git clone "https://gitlab.com/${USERNAME}/centos-stream-9.git" "${KERNEL_SRC_DIR}" || {
+                echo "${RED}${BOLD}Error: CS9 clone failed. Check URL or permissions.${NORMAL}"
+                exit 1
+            }
             ;;
         cs10)
             echo "${WHITE}Cloning the CS10 kernel source tree..."
             echo "${NORMAL}"
-            git clone "https://gitlab.com/${USER}/centos-stream-10.git" "${KERNEL_SRC_DIR}" > /dev/null 2>&1
+            git clone "https://gitlab.com/${USERNAME}/centos-stream-10.git" "${KERNEL_SRC_DIR}" || {
+                echo "${RED}${BOLD}Error: CS10 clone failed. Check URL or permissions.${NORMAL}"
+                exit 1
+            }
             ;;
         *)
             echo "${RED}${BOLD}"
@@ -319,7 +327,7 @@ clone_kernel_repos()
             exit 1
             ;;
     esac
-    
+
     # Add repositories for backporting if requested.
     if [[ "${BACKPORTING}" == true ]]; then
         add_remotes_for_backporting
@@ -328,7 +336,7 @@ clone_kernel_repos()
 
 set_config_file()
 {
-    case "${REPOSITORY}" in
+    case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
         cs9)
             CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}"
             ;;
@@ -408,14 +416,14 @@ configure_kernel()
 
 build_kernel()
 {
-    echo "${WHITE}Building the ${REPOSITORY^^} kernel..."
+    echo "${WHITE}Building the ${VERSION_OF_CENTOS_STREAM_KERNEL^^} kernel..."
     echo "${NORMAL}"
 
     echo "Log file: ${CYAN}${LOG_FILE}"
     echo "${NORMAL}"
 
-    # Set identifier for this custom kernel build.
-    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "$KERNEL_SRC_DIR/Makefile"
+    # Uncomment to set identifier for this custom kernel build.
+#    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "$KERNEL_SRC_DIR/Makefile"
 
     if [[ -n "${CROSS_COMPILE_PREFIX}" ]]; then
         MAKE_CMD="make -j$(nproc) O=${KERNEL_BUILD_DIR} ENABLE_WERROR= CROSS_COMPILE=${CROSS_COMPILE_PREFIX} ARCH=${MAKE_ARCH}"
@@ -429,8 +437,18 @@ build_kernel()
     echo "" >> "${LOG_FILE}"
 
     eval "${MAKE_CMD}" >> "${LOG_FILE}" 2>&1
-
     BUILD_EXIT_STATUS=${PIPESTATUS[0]}
+
+    # Build RPM packages if requested
+    if [[ "${BUILD_RPM_PACKAGES}" == "true" ]]; then
+        echo "Running: make -j$(nproc) rpm-pkg O=${KERNEL_BUILD_DIR}" >> "${LOG_FILE}"
+        (
+            cd "${KERNEL_SRC_DIR}" &&
+            make -j"$(nproc)" O="${KERNEL_BUILD_DIR}" rpm-pkg >> "${LOG_FILE}" 2>&1
+        )
+        BUILD_EXIT_STATUS=$?
+    fi
+
     END_TIME=$(date +%s)
     BUILD_DURATION=$((END_TIME - START_TIME))
     BUILD_MINUTES=$((BUILD_DURATION / 60))
@@ -471,7 +489,7 @@ build_kernel()
 }
 
 # Process command line options.
-while getopts "a:bdfghmp:r:t" opt; do
+while getopts "a:bdfghmp:rtv:" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
         b) BACKPORTING=true ;;
@@ -481,8 +499,9 @@ while getopts "a:bdfghmp:r:t" opt; do
         h) usage; exit ;;
         m) MENUCONFIG=true ;;
         p) PATCHES_DIR="$OPTARG" ;;
-        r) REPOSITORY="$OPTARG" ;;
+        r) BUILD_RPM_PACKAGES=true ;;
         t) RT_KERNEL=true ;;
+        v) VERSION_OF_CENTOS_STREAM_KERNEL="$OPTARG" ;;
         \?) usage; exit 1 ;;
     esac
 done
@@ -503,9 +522,9 @@ fi
 check_required_commands
 
 # Check the specified CentOS Stream kernel repository.
-case "${REPOSITORY}" in
+case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
     cs9|cs10)
-        echo "${WHITE}CentOS Stream kernel repository = ${BRIGHT_BLUE}${BOLD}${REPOSITORY}"
+        echo "${WHITE}CentOS Stream kernel repository = ${BRIGHT_BLUE}${BOLD}${VERSION_OF_CENTOS_STREAM_KERNEL}"
         echo "${NORMAL}"
         ;;
     *)
