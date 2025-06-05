@@ -11,7 +11,7 @@
 #
 # Example:
 # Clone the CS9 kernel repo, configure, and build a debug kernel:
-#   $ kbuild_centos -v cs9 -a aarch64 -g -b -f -r -d
+#   $ kbuild_centos -v cs9 -a aarch64 -g -u stable -f -r -d
 #
 # NOTE:
 # Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
@@ -19,7 +19,6 @@
 
 set -eu
 
-BACKPORTING=false
 DEBUG_KERNEL=false
 CONFIGURE=false
 CONFIG_FILE="none"
@@ -29,7 +28,8 @@ VERSION_OF_CENTOS_STREAM_KERNEL="cs9"
 RT_KERNEL=false
 TARGET_ARCH="x86_64"
 BUILD_RPM_PACKAGES=false
-USERNAME=sdunnaga
+USERNAME=sdunnaga3
+UPSTREAM_REPO=""
 
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
@@ -60,7 +60,6 @@ usage()
     echo ""
     echo "Options:"
     echo "  -a <x86_64|aarch64|riscv64>   Architecture"
-    echo "  -b                            Set up for backporting"
     echo "  -d                            DEBUG kernel"
     echo "  -f                            Configure kernel (implies clean)"
     echo "  -g                            Git clone"
@@ -69,6 +68,7 @@ usage()
     echo "  -p <patches_dir>              Patches directory"
     echo "  -r                            Build RPM packages"
     echo "  -t                            RT kernel"
+    echo "  -u <next|stable>              Add upstream kernel repository for backporting"
     echo "  -v <cs9|cs10>                 Major version of CentOS Stream kernel"
     echo ""
     exit 1
@@ -254,10 +254,16 @@ add_remotes_for_backporting()
         exit 1
     fi
 
-    # Add linux-stable kernel source repository.
-    git remote add linux-stable "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
-    git fetch -q linux-stable
-    git fetch -q --tags linux-stable
+    # Add kernel source repository for backporting.
+    if [[ "${UPSTREAM_REPO}" == "stable" ]]; then
+        git remote add linux-stable "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
+        git fetch -q linux-stable
+        git fetch -q --tags linux-stable
+    elif [[ "${UPSTREAM_REPO}" == "next" ]]; then
+        git remote add linux-next "https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git"
+        git fetch -q linux-next
+        git fetch -q --tags linux-next
+    fi
 
     # Add the specified CentOS Stream kernel repository.
     case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
@@ -328,8 +334,10 @@ clone_kernel_repos()
             ;;
     esac
 
+    echo "${NORMAL}"
+
     # Add repositories for backporting if requested.
-    if [[ "${BACKPORTING}" == true ]]; then
+    if [[ "${UPSTREAM_REPO}" == "stable" || "${UPSTREAM_REPO}" == "next" ]]; then
         add_remotes_for_backporting
     fi
 }
@@ -489,10 +497,9 @@ build_kernel()
 }
 
 # Process command line options.
-while getopts "a:bdfghmp:rtv:" opt; do
+while getopts "a:dfghmp:rtv:u:" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
-        b) BACKPORTING=true ;;
         d) DEBUG_KERNEL=true ;;
         f) CONFIGURE=true ;;
         g) GIT_CLONE=true ;;
@@ -502,6 +509,15 @@ while getopts "a:bdfghmp:rtv:" opt; do
         r) BUILD_RPM_PACKAGES=true ;;
         t) RT_KERNEL=true ;;
         v) VERSION_OF_CENTOS_STREAM_KERNEL="$OPTARG" ;;
+        u) 
+            if [[ "$OPTARG" == "stable" || "$OPTARG" == "next" ]]; then
+                UPSTREAM_REPO="$OPTARG"
+            else
+                echo "Error: -b must be either 'stable' or 'next'"
+                usage
+                exit 1
+            fi
+            ;;
         \?) usage; exit 1 ;;
     esac
 done
@@ -514,8 +530,8 @@ if [[ -z "${KERNEL_SRC_DIR}" || -z "${KERNEL_BUILD_DIR}" ]]; then
     exit 1
 else
     echo ""
-    echo "${WHITE}KERNEL_SRC_DIR =   ${BRIGHT_BLUE}${BOLD}${KERNEL_SRC_DIR}${NORMAL}"
-    echo "${WHITE}KERNEL_BUILD_DIR = ${BRIGHT_BLUE}${BOLD}${KERNEL_BUILD_DIR}"
+    echo "${WHITE}KERNEL_SRC_DIR =   ${CYAN}${KERNEL_SRC_DIR}${NORMAL}"
+    echo "${WHITE}KERNEL_BUILD_DIR = ${CYAN}${KERNEL_BUILD_DIR}"
     echo "${NORMAL}"
 fi
 
@@ -524,7 +540,7 @@ check_required_commands
 # Check the specified CentOS Stream kernel repository.
 case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
     cs9|cs10)
-        echo "${WHITE}CentOS Stream kernel repository = ${BRIGHT_BLUE}${BOLD}${VERSION_OF_CENTOS_STREAM_KERNEL}"
+        echo "${WHITE}CentOS Stream kernel repository = ${CYAN}${VERSION_OF_CENTOS_STREAM_KERNEL}"
         echo "${NORMAL}"
         ;;
     *)
