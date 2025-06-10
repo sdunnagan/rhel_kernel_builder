@@ -28,7 +28,7 @@ VERSION_OF_CENTOS_STREAM_KERNEL="cs9"
 RT_KERNEL=false
 TARGET_ARCH="x86_64"
 BUILD_RPM_PACKAGES=false
-USERNAME=sdunnaga3
+USERNAME=sdunnaga
 UPSTREAM_REPO=""
 
 CROSS_COMPILE_PREFIX=""
@@ -374,8 +374,9 @@ set_config_file()
 
 configure_kernel()
 {
-    echo "${WHITE}Cleaning the build directory..."
+    echo "${WHITE}Cleaning the build..."
     echo "${NORMAL}"
+    rm -rf ~/rpmbuild
     rm -rf "${KERNEL_BUILD_DIR}"; sync
     mkdir -p "${KERNEL_BUILD_DIR}"
 
@@ -431,28 +432,31 @@ build_kernel()
     echo "${NORMAL}"
 
     # Uncomment to set identifier for this custom kernel build.
-#    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "$KERNEL_SRC_DIR/Makefile"
+    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "${KERNEL_SRC_DIR}/Makefile"
 
+    # Set the kernel build command.
     if [[ -n "${CROSS_COMPILE_PREFIX}" ]]; then
         MAKE_CMD="make -j$(nproc) O=${KERNEL_BUILD_DIR} ENABLE_WERROR= CROSS_COMPILE=${CROSS_COMPILE_PREFIX} ARCH=${MAKE_ARCH}"
     else
         MAKE_CMD="make -j$(nproc) O=${KERNEL_BUILD_DIR} ENABLE_WERROR= ARCH=${MAKE_ARCH}"
     fi
-
     echo "${WHITE}Build command: ${CYAN}${MAKE_CMD}"
     echo "${NORMAL}"
     echo "Build command: ${MAKE_CMD}" >> "${LOG_FILE}"
     echo "" >> "${LOG_FILE}"
 
+    # Build the kernel
     eval "${MAKE_CMD}" >> "${LOG_FILE}" 2>&1
     BUILD_EXIT_STATUS=${PIPESTATUS[0]}
+    echo "" >> "${LOG_FILE}"
 
     # Build RPM packages if requested
     if [[ "${BUILD_RPM_PACKAGES}" == "true" ]]; then
-        echo "Running: make -j$(nproc) rpm-pkg O=${KERNEL_BUILD_DIR}" >> "${LOG_FILE}"
+        echo "Running: make -j$(nproc) binrpm-pkg O=${KERNEL_BUILD_DIR}" >> "${LOG_FILE}"
         (
             cd "${KERNEL_SRC_DIR}" &&
-            make -j"$(nproc)" O="${KERNEL_BUILD_DIR}" rpm-pkg >> "${LOG_FILE}" 2>&1
+            make -j"$(nproc)" O="${KERNEL_BUILD_DIR}" binrpm-pkg >> "${LOG_FILE}" 2>&1
+            cp ~/rpmbuild/RPMS/aarch64/*.rpm "${KERNEL_BUILD_DIR}"
         )
         BUILD_EXIT_STATUS=$?
     fi
