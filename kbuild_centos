@@ -9,9 +9,14 @@
 # - KERNEL_SRC_DIR
 # - KERNEL_BUILD_DIR
 #
-# Example:
-# Clone the CS9 kernel repo, configure, and build a debug kernel:
-#   $ kbuild_centos -v cs9 -a aarch64 -g -u stable -f -r -d
+# Examples:
+#
+# Clone the CS9 kernel repo, configure, prepare for backporting from
+# "linux-stable", and build a debug kernel:
+#   $ kbuild_centos -v cs9 -a aarch64 -g -u stable -f -d
+#
+# Rebuild, this time also building kernel RPM packages:
+#   $ kbuild_centos -v cs9 -a aarch64 -f -d -r
 #
 # NOTE:
 # Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
@@ -125,23 +130,37 @@ generate_ctags()
     echo "${WHITE}Generating ctags..."
     echo "${NORMAL}"
 
-    export TMPDIR=~/tmp
-    mkdir -p "${TMPDIR}"
+    # Create necessary directories
+    mkdir -p ~/tmp
+    rm -f "${KERNEL_BUILD_DIR}/tags"
 
-    ctags --append=yes \
+    # Generate tags from source directory but write to build directory.
+    # Use kernel-specific exclusions.
+    ctags --tag-relative=yes \
           --sort=yes \
           --recurse \
           --links=no \
-          --languages=C,C++,Python \
+          --languages=C,C++ \
           --c-kinds=+p \
           --fields=+iaS \
           --extras=+q \
+          -f "${KERNEL_BUILD_DIR}/tags" \
           --exclude="*.o" \
           --exclude="*.so" \
           --exclude="*.a" \
           --exclude="*.bin" \
+          --exclude="*.ko" \
+          --exclude="*.mod" \
+          --exclude="*.cmd" \
+          --exclude="*.d" \
+          --exclude="*.symtypes" \
+          --exclude="*.order" \
           --exclude=".git/*" \
-          -f "${KERNEL_BUILD_DIR}/tags"
+          --exclude="cscope.*" \
+          --exclude="tags*" \
+          --exclude="Module.symvers" \
+          --exclude="vmlinux*" \
+          "${KERNEL_SRC_DIR}"
 
     if [[ $? -ne 0 ]]; then
         echo "${RED}${BOLD}"
