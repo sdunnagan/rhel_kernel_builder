@@ -13,10 +13,10 @@
 #
 # Clone the CS9 kernel repo, configure, prepare for backporting from
 # "linux-stable", and build a debug kernel:
-#   $ kbuild_centos -v cs9 -a aarch64 -g -u stable -f -d
+#   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -g -c -d
 #
 # Rebuild, this time also building kernel RPM packages:
-#   $ kbuild_centos -v cs9 -a aarch64 -f -d -r
+#   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -c -d -r
 #
 # NOTE:
 # Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
@@ -33,8 +33,8 @@ VERSION_OF_CENTOS_STREAM_KERNEL="cs9"
 RT_KERNEL=false
 TARGET_ARCH="x86_64"
 BUILD_RPM_PACKAGES=false
-USERNAME=sdunnaga
-UPSTREAM_REPO=""
+LINUX_REPO="stable"
+CS_FORK=""
 
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
@@ -66,14 +66,15 @@ usage()
     echo "Options:"
     echo "  -a <x86_64|aarch64|riscv64>   Architecture"
     echo "  -d                            DEBUG kernel"
-    echo "  -f                            Configure kernel (implies clean)"
+    echo "  -c                            Configure kernel (implies clean)"
+    echo "  -f <username>                 CentOS Stream kernel fork name"
     echo "  -g                            Git clone"
     echo "  -h                            Show help"
+    echo "  -l <next|stable>              Linux kernel repository"
     echo "  -m                            Run menuconfig"
     echo "  -p <patches_dir>              Patches directory"
     echo "  -r                            Build RPM packages"
     echo "  -t                            RT kernel"
-    echo "  -u <next|stable>              Add upstream kernel repository for backporting"
     echo "  -v <cs9|cs10>                 Major version of CentOS Stream kernel"
     echo ""
     exit 1
@@ -274,11 +275,11 @@ add_remotes_for_backporting()
     fi
 
     # Add kernel source repository for backporting.
-    if [[ "${UPSTREAM_REPO}" == "stable" ]]; then
+    if [[ "${LINUX_REPO}" == "stable" ]]; then
         git remote add linux-stable "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
         git fetch -q linux-stable
         git fetch -q --tags linux-stable
-    elif [[ "${UPSTREAM_REPO}" == "next" ]]; then
+    elif [[ "${LINUX_REPO}" == "next" ]]; then
         git remote add linux-next "https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git"
         git fetch -q linux-next
         git fetch -q --tags linux-next
@@ -327,12 +328,17 @@ clone_kernel_repos()
         fi
     fi
 
+    if [[ -z "$CS_FORK" ]]; then
+        echo "Error: CentOS Stream fork name is not set."
+        exit 1
+    fi
+
     # Clone the specified CentOS Stream kernel source repository.
     case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
         cs9)
             echo "${WHITE}Cloning the CS9 kernel source tree..."
             echo "${NORMAL}"
-            git clone "https://gitlab.com/${USERNAME}/centos-stream-9.git" "${KERNEL_SRC_DIR}" || {
+            git clone "https://gitlab.com/${CS_FORK}/centos-stream-9.git" "${KERNEL_SRC_DIR}" || {
                 echo "${RED}${BOLD}Error: CS9 clone failed. Check URL or permissions.${NORMAL}"
                 exit 1
             }
@@ -340,7 +346,7 @@ clone_kernel_repos()
         cs10)
             echo "${WHITE}Cloning the CS10 kernel source tree..."
             echo "${NORMAL}"
-            git clone "https://gitlab.com/${USERNAME}/centos-stream-10.git" "${KERNEL_SRC_DIR}" || {
+            git clone "https://gitlab.com/${CS_FORK}/centos-stream-10.git" "${KERNEL_SRC_DIR}" || {
                 echo "${RED}${BOLD}Error: CS10 clone failed. Check URL or permissions.${NORMAL}"
                 exit 1
             }
@@ -356,7 +362,7 @@ clone_kernel_repos()
     echo "${NORMAL}"
 
     # Add repositories for backporting if requested.
-    if [[ "${UPSTREAM_REPO}" == "stable" || "${UPSTREAM_REPO}" == "next" ]]; then
+    if [[ "${LINUX_REPO}" == "stable" || "${LINUX_REPO}" == "next" ]]; then
         add_remotes_for_backporting
     fi
 }
@@ -451,7 +457,7 @@ build_kernel()
     echo "${NORMAL}"
 
     # Uncomment to set identifier for this custom kernel build.
-    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "${KERNEL_SRC_DIR}/Makefile"
+    #sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "${KERNEL_SRC_DIR}/Makefile"
 
     # Set the kernel build command.
     if [[ -n "${CROSS_COMPILE_PREFIX}" ]]; then
@@ -520,27 +526,28 @@ build_kernel()
 }
 
 # Process command line options.
-while getopts "a:dfghmp:rtv:u:" opt; do
+while getopts "a:cdf:ghl:mp:rtv:" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
         d) DEBUG_KERNEL=true ;;
-        f) CONFIGURE=true ;;
+        c) CONFIGURE=true ;;
+        f) CS_FORK="$OPTARG" ;;
         g) GIT_CLONE=true ;;
         h) usage; exit ;;
+        l) 
+           if [[ "$OPTARG" == "stable" || "$OPTARG" == "next" ]]; then
+               LINUX_REPO="$OPTARG"
+           else
+               echo "Error: -b must be either 'stable' or 'next'"
+               usage
+               exit 1
+           fi
+           ;;
         m) MENUCONFIG=true ;;
         p) PATCHES_DIR="$OPTARG" ;;
         r) BUILD_RPM_PACKAGES=true ;;
         t) RT_KERNEL=true ;;
         v) VERSION_OF_CENTOS_STREAM_KERNEL="$OPTARG" ;;
-        u) 
-            if [[ "$OPTARG" == "stable" || "$OPTARG" == "next" ]]; then
-                UPSTREAM_REPO="$OPTARG"
-            else
-                echo "Error: -b must be either 'stable' or 'next'"
-                usage
-                exit 1
-            fi
-            ;;
         \?) usage; exit 1 ;;
     esac
 done
