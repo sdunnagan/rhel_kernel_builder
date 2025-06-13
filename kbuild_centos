@@ -11,9 +11,9 @@
 #
 # Examples:
 #
-# Clone the CS9 kernel repo, configure, prepare for backporting from
-# "linux-stable", and build a debug kernel:
-#   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -g -c -d
+# Clone the CentOS Stream kernel repository, configure the kernel, add remote
+# repositories for backporting, and build a debug kernel:
+#   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -g -b -c -d
 #
 # Rebuild, this time also building kernel RPM packages:
 #   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -c -d -r
@@ -24,6 +24,7 @@
 
 set -eu
 
+BACKPORTING=false
 DEBUG_KERNEL=false
 CONFIGURE=false
 CONFIG_FILE="none"
@@ -65,6 +66,7 @@ usage()
     echo ""
     echo "Options:"
     echo "  -a <x86_64|aarch64|riscv64>   Architecture"
+    echo "  -b                            Add remote repositories for backporting"
     echo "  -d                            DEBUG kernel"
     echo "  -c                            Configure kernel (implies clean)"
     echo "  -f <username>                 CentOS Stream kernel fork name"
@@ -362,7 +364,7 @@ clone_kernel_repos()
     echo "${NORMAL}"
 
     # Add repositories for backporting if requested.
-    if [[ "${LINUX_REPO}" == "stable" || "${LINUX_REPO}" == "next" ]]; then
+    if [[ "${BACKPORTING}" == "true" && ( "${LINUX_REPO}" == "stable" || "${LINUX_REPO}" == "next" ) ]]; then
         add_remotes_for_backporting
     fi
 }
@@ -526,9 +528,10 @@ build_kernel()
 }
 
 # Process command line options.
-while getopts "a:cdf:ghl:mp:rtv:" opt; do
+while getopts "a:bcdf:ghl:mp:rtv:" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
+        b) BACKPORTING=true ;;
         d) DEBUG_KERNEL=true ;;
         c) CONFIGURE=true ;;
         f) CS_FORK="$OPTARG" ;;
