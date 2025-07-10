@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #------------------------------------------------------------------------------
 #
-# File:         kbuild_centos
+# File:         rhel_kernel_builder
 #
 # Description:  Build script for CentOS Stream kernel.
 #
@@ -11,12 +11,13 @@
 #
 # Examples:
 #
-# Clone the CentOS Stream kernel repository, configure the kernel, add remote
-# repositories for backporting, and build a debug kernel:
-#   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -g -b -c -d
+# Clone the specified GitLab fork of the CentOS Stream kernel repo (the
+# Y-stream for RHEL kernel), configure the kernel, add remote repos for
+# backporting from the upstream kernel, and build with debugging enabled:
+#   $ rhel_kernel_builder -s y9 -f sdunnaga-12345 -a aarch64 -g -b -c -d
 #
 # Rebuild, this time also building kernel RPM packages:
-#   $ kbuild_centos -v cs9 -f sdunnaga -a aarch64 -c -d -r
+#   $ rhel_kernel_builder -s y9 -f sdunnaga-12345 -a aarch64 -c -d -r
 #
 # NOTE:
 # Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
@@ -30,12 +31,12 @@ CONFIGURE=false
 CONFIG_FILE="none"
 GIT_CLONE=false
 MENUCONFIG=false
-VERSION_OF_CENTOS_STREAM_KERNEL="cs9"
+RHEL_KERNEL_STREAM="y9"
 RT_KERNEL=false
 TARGET_ARCH="x86_64"
 BUILD_RPM_PACKAGES=false
 LINUX_REPO="stable"
-CS_FORK=""
+GITLAB_NAMESPACE="redhat"
 
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
@@ -69,15 +70,15 @@ usage()
     echo "  -b                            Add remote repositories for backporting"
     echo "  -d                            DEBUG kernel"
     echo "  -c                            Configure kernel (implies clean)"
-    echo "  -f <username>                 CentOS Stream kernel fork name"
+    echo "  -f <username>                 CentOS Stream or RHEL kernel fork name"
     echo "  -g                            Git clone"
     echo "  -h                            Show help"
     echo "  -l <next|stable>              Linux kernel repository"
     echo "  -m                            Run menuconfig"
     echo "  -p <patches_dir>              Patches directory"
     echo "  -r                            Build RPM packages"
+    echo "  -s <y9|y10|z9|z10>            RHEL kernel stream (Y-stream or Z-stream)"
     echo "  -t                            RT kernel"
-    echo "  -v <cs9|cs10>                 Major version of CentOS Stream kernel"
     echo ""
     exit 1
 }
@@ -111,17 +112,17 @@ create_log_file()
     TIMESTAMP=$(date -d "today" +"%Y_%m_%d_%H%M")
 
     mkdir -p ~/logs
-    LOG_FILE=~/logs/${VERSION_OF_CENTOS_STREAM_KERNEL}_kernel_build_${TIMESTAMP}.log
+    LOG_FILE=~/logs/${RHEL_KERNEL_STREAM}_kernel_build_${TIMESTAMP}.log
 
     {
         echo "//---------------------------------------------------------------"
-        echo "// ${VERSION_OF_CENTOS_STREAM_KERNEL^^} Kernel Build"
+        echo "// ${RHEL_KERNEL_STREAM^^} Kernel Build"
         echo "// ${DATE_STR}"
         echo "// KERNEL_SRC_DIR =   ${KERNEL_SRC_DIR}"
         echo "// KERNEL_BUILD_DIR = ${KERNEL_BUILD_DIR}"
         echo "// ${GCC_VERSION}"
         if [[ ${CONFIGURE} == "true" ]]; then
-            echo "// ${VERSION_OF_CENTOS_STREAM_KERNEL^^} kernel config file: ${CONFIG_FILE}"
+            echo "// ${RHEL_KERNEL_STREAM^^} kernel config file: ${CONFIG_FILE}"
         fi
         echo "//---------------------------------------------------------------"
         echo ""
@@ -276,6 +277,36 @@ add_remotes_for_backporting()
         exit 1
     fi
 
+    # Add a Y-stream or Z-stream kernel source repo as a remote.
+    case "${RHEL_KERNEL_STREAM}" in
+        y9)
+            git remote add cs9 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9"
+            git fetch -q cs9
+            git fetch -q --tags cs9
+            ;;
+        y10)
+            git remote add cs10 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10"
+            git fetch -q cs10
+            git fetch -q --tags cs10
+            ;;
+        z9)
+            git remote add rhel9 "https://gitlab.com/redhat/rhel/src/kernel/rhel-9"
+            git fetch -q rhel9
+            git fetch -q --tags rhel9
+            ;;
+        z10)
+            git remote add rhel10 "https://gitlab.com/redhat/rhel/src/kernel/rhel-10"
+            git fetch -q rhel10
+            git fetch -q --tags rhel10
+            ;;
+        *)
+            echo "${RED}${BOLD}"
+            echo "Error: invalid kernel source repo (must be Y-stream or Z-stream)"
+            echo "${NORMAL}"
+            exit 1
+            ;;
+    esac
+
     # Add kernel source repository for backporting.
     if [[ "${LINUX_REPO}" == "stable" ]]; then
         git remote add linux-stable "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
@@ -286,26 +317,6 @@ add_remotes_for_backporting()
         git fetch -q linux-next
         git fetch -q --tags linux-next
     fi
-
-    # Add the specified CentOS Stream kernel repository.
-    case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
-        cs9)
-            git remote add cs9 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9"
-            git fetch -q cs9
-            git fetch -q --tags cs9
-            ;;
-        cs10)
-            git remote add cs10 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10"
-            git fetch -q cs10
-            git fetch -q --tags cs10
-            ;;
-        *)
-            echo "${RED}${BOLD}"
-            echo "Error: Invalid repository specified. Must be 'cs9' or 'cs10'"
-            echo "${NORMAL}"
-            exit 1
-            ;;
-    esac
 }
 
 clone_kernel_repos()
@@ -330,36 +341,53 @@ clone_kernel_repos()
         fi
     fi
 
-    if [[ -z "$CS_FORK" ]]; then
-        echo "Error: CentOS Stream fork name is not set."
-        exit 1
-    fi
-
-    # Clone the specified CentOS Stream kernel source repository.
-    case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
-        cs9)
-            echo "${WHITE}Cloning the CS9 kernel source tree..."
-            echo "${NORMAL}"
-            git clone "https://gitlab.com/${CS_FORK}/centos-stream-9.git" "${KERNEL_SRC_DIR}" || {
-                echo "${RED}${BOLD}Error: CS9 clone failed. Check URL or permissions.${NORMAL}"
-                exit 1
-            }
+    # Clone the specified RHEL kernel source repository.
+    case "${RHEL_KERNEL_STREAM}" in
+        y9)
+            GROUP="centos-stream"
+            REPO="centos-stream-9"
+            DESC="CentOS Stream 9 (Y‑stream)"
             ;;
-        cs10)
-            echo "${WHITE}Cloning the CS10 kernel source tree..."
-            echo "${NORMAL}"
-            git clone "https://gitlab.com/${CS_FORK}/centos-stream-10.git" "${KERNEL_SRC_DIR}" || {
-                echo "${RED}${BOLD}Error: CS10 clone failed. Check URL or permissions.${NORMAL}"
-                exit 1
-            }
+        y10)
+            GROUP="centos-stream"
+            REPO="centos-stream-10"
+            DESC="CentOS Stream 10 (Y‑stream)"
+            ;;
+        z9)
+            GROUP="rhel"
+            REPO="rhel-9"
+            DESC="RHEL 9 (Z‑stream)"
+            ;;
+        z10)
+            GROUP="rhel"
+            REPO="rhel-10"
+            DESC="RHEL 10 (Z‑stream)"
             ;;
         *)
             echo "${RED}${BOLD}"
-            echo "Error: Invalid repository specified. Must be 'cs9' or 'cs10'"
+            echo >&2 "Error: Invalid RHEL_KERNEL_STREAM '${RHEL_KERNEL_STREAM}'."
+            echo >&2 "       Must be one of: y9, y10, z9, z10."
             echo "${NORMAL}"
             exit 1
             ;;
     esac
+
+    if [[ "${GITLAB_NAMESPACE}" == "redhat" ]]; then
+        # Official upstream uses nested path
+        RHEL_KERNEL_URL="https://gitlab.com/${GITLAB_NAMESPACE}/${GROUP}/src/kernel/${REPO}.git"
+    else
+        # Forks are flattened at the project root
+        RHEL_KERNEL_URL="https://gitlab.com/${GITLAB_NAMESPACE}/${REPO}.git"
+    fi
+
+    echo "${WHITE}Cloning ${DESC} kernel source tree from: ${CYAN}${RHEL_KERNEL_URL}${NORMAL}"
+    echo ""
+
+    git clone "${RHEL_KERNEL_URL}" "${KERNEL_SRC_DIR}" || {
+        echo >&2 "${RED}${BOLD}Error: cloning '${REPO}' failed. Check RHEL kernel URL or permissions."
+        echo "${NORMAL}"
+        exit 1
+    }
 
     echo "${NORMAL}"
 
@@ -371,11 +399,11 @@ clone_kernel_repos()
 
 set_config_file()
 {
-    case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
-        cs9)
+    case "${RHEL_KERNEL_STREAM}" in
+        y9|z9)
             CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}"
             ;;
-        cs10)
+        y10|z10)
             CONFIG_FILE="redhat/configs/kernel-6.12.0-${TARGET_ARCH}"
             ;;
         *)
@@ -452,7 +480,28 @@ configure_kernel()
 
 build_kernel()
 {
-    echo "${WHITE}Building the ${VERSION_OF_CENTOS_STREAM_KERNEL^^} kernel..."
+    case "${RHEL_KERNEL_STREAM}" in
+        y9)
+            echo "${WHITE}Building the CentOS Stream 9 kernel..."
+            ;;
+        y10)
+            echo "${WHITE}Building the CentOS Stream 10 kernel..."
+            ;;
+        z9)
+            echo "${WHITE}Building the RHEL 9 kernel..."
+            ;;
+        z10)
+            echo "${WHITE}Building the RHEL 10 kernel..."
+            ;;
+        *)
+            echo "${RED}${BOLD}"
+            echo >&2 "Error: Invalid RHEL_KERNEL_STREAM '${RHEL_KERNEL_STREAM}'."
+            echo >&2 "       Must be one of: y9, y10, z9, z10."
+            echo "${NORMAL}"
+            exit 1
+            ;;
+    esac
+
     echo "${NORMAL}"
 
     echo "Log file: ${CYAN}${LOG_FILE}"
@@ -528,13 +577,13 @@ build_kernel()
 }
 
 # Process command line options.
-while getopts "a:bcdf:ghl:mp:rtv:" opt; do
+while getopts "a:bcdf:ghl:mp:rs:t" opt; do
     case $opt in
         a) TARGET_ARCH="$OPTARG" ;;
         b) BACKPORTING=true ;;
         d) DEBUG_KERNEL=true ;;
         c) CONFIGURE=true ;;
-        f) CS_FORK="$OPTARG" ;;
+        f) GITLAB_NAMESPACE="$OPTARG" ;;
         g) GIT_CLONE=true ;;
         h) usage; exit ;;
         l) 
@@ -549,8 +598,8 @@ while getopts "a:bcdf:ghl:mp:rtv:" opt; do
         m) MENUCONFIG=true ;;
         p) PATCHES_DIR="$OPTARG" ;;
         r) BUILD_RPM_PACKAGES=true ;;
+        s) RHEL_KERNEL_STREAM="$OPTARG" ;;
         t) RT_KERNEL=true ;;
-        v) VERSION_OF_CENTOS_STREAM_KERNEL="$OPTARG" ;;
         \?) usage; exit 1 ;;
     esac
 done
@@ -569,20 +618,6 @@ else
 fi
 
 check_required_commands
-
-# Check the specified CentOS Stream kernel repository.
-case "${VERSION_OF_CENTOS_STREAM_KERNEL}" in
-    cs9|cs10)
-        echo "${WHITE}CentOS Stream kernel repository = ${CYAN}${VERSION_OF_CENTOS_STREAM_KERNEL}"
-        echo "${NORMAL}"
-        ;;
-    *)
-        echo "${RED}${BOLD}"
-        echo "Error: Invalid repository specified. Must be 'cs9' or 'cs10'"
-        echo "${NORMAL}"
-        exit 1
-        ;;
-esac
 
 set_target_architecture
 
