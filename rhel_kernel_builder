@@ -508,7 +508,8 @@ build_kernel()
     echo "${NORMAL}"
 
     # Uncomment to set identifier for this custom kernel build.
-    #sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "${KERNEL_SRC_DIR}/Makefile"
+    # tango
+    sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "${KERNEL_SRC_DIR}/Makefile"
 
     # Set the kernel build command.
     if [[ -n "${CROSS_COMPILE_PREFIX}" ]]; then
@@ -532,7 +533,7 @@ build_kernel()
         (
             cd "${KERNEL_SRC_DIR}" &&
             make -j"$(nproc)" O="${KERNEL_BUILD_DIR}" binrpm-pkg >> "${LOG_FILE}" 2>&1
-            cp ~/rpmbuild/RPMS/aarch64/*.rpm "${KERNEL_BUILD_DIR}"
+            cp ${KERNEL_BUILD_DIR}/rpmbuild/RPMS/aarch64/*.rpm ${KERNEL_BUILD_DIR}
         )
         BUILD_EXIT_STATUS=$?
     fi
