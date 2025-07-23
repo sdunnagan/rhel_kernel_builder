@@ -12,20 +12,21 @@
 # Examples:
 #
 # Clone the specified GitLab fork of the CentOS Stream kernel repo (the
-# Y-stream for RHEL kernel), configure the kernel, add remote repos for
-# backporting from the upstream kernel, and build with debugging enabled:
-#   $ rhel_kernel_builder -s y9 -f sdunnaga-12345 -a aarch64 -g -b -c -d
+# Y-stream for RHEL kernel), configure the kernel, prepare for backporting,
+# and build a debug kernel:
+#   $ rhel_kernel_builder -s y9 -f sdunnaga-12345 -a aarch64 -g -B -c -d -b
 #
 # Rebuild, this time also building kernel RPM packages:
-#   $ rhel_kernel_builder -s y9 -f sdunnaga-12345 -a aarch64 -c -d -r
+#   $ rhel_kernel_builder -s y9 -f sdunnaga-12345 -a aarch64 -c -d -b -r
 #
-# NOTE:
-# Works on Fedora 40 on both x86_64 and aarch64, but not on Fedora 41.
+# Works on Fedora 40 on both x86_64 and aarch64 with gcc 14.2.1, but not
+# Fedora 41.
 #------------------------------------------------------------------------------
 
 set -eu
 
 BACKPORTING=false
+BUILD_KERNEL=false
 DEBUG_KERNEL=false
 CONFIGURE=false
 CONFIG_FILE="none"
@@ -41,7 +42,6 @@ GITLAB_NAMESPACE="redhat"
 CROSS_COMPILE_PREFIX=""
 CUSTOM_KERNEL_ID="chopin"
 PATCHES_DIR=""
-BUILD_SUCCESS=false
 
 BLACK=$(tput setaf 0)
 RED=$(tput setaf 1)
@@ -67,7 +67,8 @@ usage()
     echo ""
     echo "Options:"
     echo "  -a <x86_64|aarch64|riscv64>   Architecture"
-    echo "  -b                            Add remote repositories for backporting"
+    echo "  -b                            Build the kernel"
+    echo "  -B                            Prepare for backporting"
     echo "  -d                            DEBUG kernel"
     echo "  -c                            Configure kernel (implies clean)"
     echo "  -f <username>                 CentOS Stream or RHEL kernel fork name"
@@ -81,6 +82,38 @@ usage()
     echo "  -t                            RT kernel"
     echo ""
     exit 1
+}
+
+parse_args ()
+{
+    while getopts "a:bBcdf:ghl:mp:rs:t" opt
+    do
+        case $opt in
+            a) TARGET_ARCH="$OPTARG" ;;
+            b) BUILD_KERNEL=true ;;
+            B) BACKPORTING=true ;;
+            d) DEBUG_KERNEL=true ;;
+            c) CONFIGURE=true ;;
+            f) GITLAB_NAMESPACE="$OPTARG" ;;
+            g) GIT_CLONE=true ;;
+            h) usage; exit ;;
+            l) 
+               if [[ "$OPTARG" == "stable" || "$OPTARG" == "next" ]]; then
+                   LINUX_REPO="$OPTARG"
+               else
+                   echo "Error: -b must be either 'stable' or 'next'"
+                   usage
+                   exit 1
+               fi
+               ;;
+            m) MENUCONFIG=true ;;
+            p) PATCHES_DIR="$OPTARG" ;;
+            r) BUILD_RPM_PACKAGES=true ;;
+            s) RHEL_KERNEL_STREAM="$OPTARG" ;;
+            t) RT_KERNEL=true ;;
+            \?) usage; exit 1 ;;
+        esac
+    done
 }
 
 set_my_kernel_configs()
@@ -98,6 +131,13 @@ set_my_kernel_configs()
     # Disable enforcement of module signing
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable MODULE_SIG_ALL
     "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable MODULE_SIG_FORCE
+
+    # Workaround: disable Intel wireless KUnit tests to prevent build failures
+    # due to missing iwl-trans.h in drivers/net/wireless/intel/iwlwifi/mld/tests
+    "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable KUNIT
+
+    # Workaround: disable IWLMLD (experimental multi-link support).
+    "${KERNEL_SRC_DIR}/scripts/config" --file "${KERNEL_BUILD_DIR}/.config" --disable IWLMLD
 }
 
 create_log_file()
@@ -261,9 +301,9 @@ set_target_architecture() {
     esac
 }
 
-add_remotes_for_backporting()
+prepare_for_backporting()
 {
-    echo "${WHITE}Adding repositories for backporting..."
+    echo "${WHITE}Preparing for backporting..."
     echo "${NORMAL}"
 
     # Change into the kernel source directory
@@ -277,45 +317,37 @@ add_remotes_for_backporting()
         exit 1
     fi
 
-    # Add a Y-stream or Z-stream kernel source repo as a remote.
+    # Add CS/RHEL Y-stream or Z-stream kernel source repo as a remote.
     case "${RHEL_KERNEL_STREAM}" in
         y9)
-            git remote add cs9 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9"
-            git fetch -q cs9
-            git fetch -q --tags cs9
-            ;;
+            git remote add cs9 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9.git"
+            git fetch cs9
+            ;; 
         y10)
-            git remote add cs10 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10"
-            git fetch -q cs10
-            git fetch -q --tags cs10
+            git remote add cs10 "https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10.git"
+            git fetch cs10
             ;;
         z9)
-            git remote add rhel9 "https://gitlab.com/redhat/rhel/src/kernel/rhel-9"
-            git fetch -q rhel9
-            git fetch -q --tags rhel9
+            git remote add rhel9 "https://gitlab.com/redhat/rhel/src/kernel/rhel-9.git"
+            git fetch rhel9
             ;;
         z10)
-            git remote add rhel10 "https://gitlab.com/redhat/rhel/src/kernel/rhel-10"
-            git fetch -q rhel10
-            git fetch -q --tags rhel10
+            git remote add rhel10 "https://gitlab.com/redhat/rhel/src/kernel/rhel-10.git"
+            git fetch rhel10
             ;;
         *)
-            echo "${RED}${BOLD}"
-            echo "Error: invalid kernel source repo (must be Y-stream or Z-stream)"
-            echo "${NORMAL}"
+            echo "${RED}${BOLD}Error: invalid kernel source repo (must be Y-stream or Z-stream)${NORMAL}"
             exit 1
             ;;
     esac
 
-    # Add kernel source repository for backporting.
+    # Add upstream kernel source repo as a remote.
     if [[ "${LINUX_REPO}" == "stable" ]]; then
         git remote add linux-stable "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git"
         git fetch -q linux-stable
-        git fetch -q --tags linux-stable
     elif [[ "${LINUX_REPO}" == "next" ]]; then
         git remote add linux-next "https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git"
         git fetch -q linux-next
-        git fetch -q --tags linux-next
     fi
 }
 
@@ -380,7 +412,7 @@ clone_kernel_repos()
         RHEL_KERNEL_URL="https://gitlab.com/${GITLAB_NAMESPACE}/${REPO}.git"
     fi
 
-    echo "${WHITE}Cloning ${DESC} kernel source tree from: ${CYAN}${RHEL_KERNEL_URL}${NORMAL}"
+    echo "${WHITE}Cloning ${DESC} kernel source tree...${NORMAL}"
     echo ""
 
     git clone "${RHEL_KERNEL_URL}" "${KERNEL_SRC_DIR}" || {
@@ -390,15 +422,14 @@ clone_kernel_repos()
     }
 
     echo "${NORMAL}"
-
-    # Add repositories for backporting if requested.
-    if [[ "${BACKPORTING}" == "true" && ( "${LINUX_REPO}" == "stable" || "${LINUX_REPO}" == "next" ) ]]; then
-        add_remotes_for_backporting
-    fi
 }
 
-set_config_file()
+generate_config()
 {
+    echo "${WHITE}Generating kernel config..."
+    echo "${NORMAL}"
+    make dist-configs > /dev/null 2>&1
+
     case "${RHEL_KERNEL_STREAM}" in
         y9|z9)
             CONFIG_FILE="redhat/configs/kernel-5.14.0-${TARGET_ARCH}"
@@ -425,38 +456,37 @@ set_config_file()
     fi
 
     CONFIG_FILE="${CONFIG_FILE}.config"
+
+    # Copy the kernel config file to .config in the build directory.
+    cp "${CONFIG_FILE}" "${KERNEL_BUILD_DIR}/.config"
 }
 
 configure_kernel()
 {
-    echo "${WHITE}Cleaning the build..."
+    echo "${WHITE}Cleaning kernel build..."
     echo "${NORMAL}"
     rm -rf ~/rpmbuild
     rm -rf "${KERNEL_BUILD_DIR}"; sync
     mkdir -p "${KERNEL_BUILD_DIR}"
 
-    echo "${WHITE}Generating kernel configs..."
-    echo "${NORMAL}"
-    make dist-configs > /dev/null 2>&1
+    # Generate a config to use as a starting point.
+    generate_config
 
-    set_config_file
-
-    # Copy the kernel config file to .config in the build directory.
-    cp "${CONFIG_FILE}" "${KERNEL_BUILD_DIR}/.config"
-    echo "${WHITE}CentOS Stream kernel config: ${BRIGHT_BLUE}${BOLD}${CONFIG_FILE}"
-    echo "${NORMAL}"
-
-    # Set my usual kernel configs.
-    echo "${WHITE}Set my usual kernel configs ..."
+    # Set the config with my selections.
+    echo "${WHITE}Setting my kernel configs..."
     echo "${NORMAL}"
     set_my_kernel_configs
 
     # Clean the kernel source tree.
     echo "${WHITE}Cleaning the source tree..."
     echo "${NORMAL}"
-    make ARCH="${MAKE_ARCH}" mrproper > /dev/null 2>&1
+    make ARCH="${MAKE_ARCH}" mrproper
 
-    # Resolve any new or unset config options using default values.
+    # olddefconfig updates the config by resolving unset options and
+    # reconciling configs according to the kernel’s current Kconfig
+    # dependencies and defaults — effectively enforcing consistency and
+    # applying necessary corrections.
+    echo ""
     echo "${WHITE}Running olddefconfig..."
     echo "${NORMAL}"
     make O="${KERNEL_BUILD_DIR}" ARCH="${MAKE_ARCH}" olddefconfig > /dev/null 2>&1
@@ -474,8 +504,6 @@ configure_kernel()
             fi
         fi
     fi
-
-    generate_ctags
 }
 
 build_kernel()
@@ -503,12 +531,10 @@ build_kernel()
     esac
 
     echo "${NORMAL}"
-
-    echo "Log file: ${CYAN}${LOG_FILE}"
+    echo "${WHITE}Log file: ${CYAN}${LOG_FILE}"
     echo "${NORMAL}"
 
     # Uncomment to set identifier for this custom kernel build.
-    # tango
     sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = -${CUSTOM_KERNEL_ID}/" "${KERNEL_SRC_DIR}/Makefile"
 
     # Set the kernel build command.
@@ -523,8 +549,8 @@ build_kernel()
     echo "" >> "${LOG_FILE}"
 
     # Build the kernel
-    eval "${MAKE_CMD}" >> "${LOG_FILE}" 2>&1
-    BUILD_EXIT_STATUS=${PIPESTATUS[0]}
+    ${MAKE_CMD} >> "${LOG_FILE}" 2>&1
+    BUILD_EXIT_STATUS=$?
     echo "" >> "${LOG_FILE}"
 
     # Build RPM packages if requested
@@ -533,7 +559,7 @@ build_kernel()
         (
             cd "${KERNEL_SRC_DIR}" &&
             make -j"$(nproc)" O="${KERNEL_BUILD_DIR}" binrpm-pkg >> "${LOG_FILE}" 2>&1
-            cp ${KERNEL_BUILD_DIR}/rpmbuild/RPMS/aarch64/*.rpm ${KERNEL_BUILD_DIR}
+            cp "${KERNEL_BUILD_DIR}/rpmbuild/RPMS/${TARGET_ARCH}"/*.rpm "${KERNEL_BUILD_DIR}" 2>/dev/null || true
         )
         BUILD_EXIT_STATUS=$?
     fi
@@ -543,15 +569,14 @@ build_kernel()
     BUILD_MINUTES=$((BUILD_DURATION / 60))
     BUILD_SECONDS=$((BUILD_DURATION % 60))
 
-    echo "" >> "${LOG_FILE}"
-    echo "//---------------------------------------------------------------" >> "${LOG_FILE}"
+    BUILD_RESULT=1
 
     case "${TARGET_ARCH}" in
         aarch64)
             IMAGE_FILE="${KERNEL_BUILD_DIR}/arch/arm64/boot/Image"
             if [[ ${BUILD_EXIT_STATUS} -eq 0 && -f "${IMAGE_FILE}" ]]; then
                 echo "${GREEN}${BOLD}Build success${NORMAL}"
-                BUILD_SUCCESS=true
+                BUILD_RESULT=0
             else
                 echo "${RED}${BOLD}Build failed${NORMAL}"
             fi
@@ -560,119 +585,132 @@ build_kernel()
             IMAGE_FILE="${KERNEL_BUILD_DIR}/arch/riscv/boot/Image"
             if [[ ${BUILD_EXIT_STATUS} -eq 0 && -f "${IMAGE_FILE}" ]]; then
                 echo "${GREEN}${BOLD}Build success${NORMAL}"
-                BUILD_SUCCESS=true
+                BUILD_RESULT=0
             else
                 echo "${RED}${BOLD}Build failed${NORMAL}"
             fi
             ;;
         x86_64)
             VMLINUX_FILE="${KERNEL_BUILD_DIR}/vmlinux"
-            if [[ "${BUILD_EXIT_STATUS}" -eq 0 && ( -f "${VMLINUX_FILE}" || -f "${KERNEL_SRC_DIR}/vmlinux" ) ]]; then
+            if [[ ${BUILD_EXIT_STATUS} -eq 0 && ( -f "${VMLINUX_FILE}" || -f "${KERNEL_SRC_DIR}/vmlinux" ) ]]; then
                 echo "${GREEN}${BOLD}Build success${NORMAL}"
-                BUILD_SUCCESS=true
+                BUILD_RESULT=0
             else
                 echo "${RED}${BOLD}Build failed${NORMAL}"
             fi
             ;;
+        *)
+            echo "${RED}${BOLD}Unknown TARGET_ARCH: ${TARGET_ARCH}${NORMAL}"
+            ;;
     esac
+
+    echo "" >> "${LOG_FILE}"
+    echo "//---------------------------------------------------------------" >> "${LOG_FILE}"
+
+    return ${BUILD_RESULT}
 }
 
-# Process command line options.
-while getopts "a:bcdf:ghl:mp:rs:t" opt; do
-    case $opt in
-        a) TARGET_ARCH="$OPTARG" ;;
-        b) BACKPORTING=true ;;
-        d) DEBUG_KERNEL=true ;;
-        c) CONFIGURE=true ;;
-        f) GITLAB_NAMESPACE="$OPTARG" ;;
-        g) GIT_CLONE=true ;;
-        h) usage; exit ;;
-        l) 
-           if [[ "$OPTARG" == "stable" || "$OPTARG" == "next" ]]; then
-               LINUX_REPO="$OPTARG"
-           else
-               echo "Error: -b must be either 'stable' or 'next'"
-               usage
-               exit 1
-           fi
-           ;;
-        m) MENUCONFIG=true ;;
-        p) PATCHES_DIR="$OPTARG" ;;
-        r) BUILD_RPM_PACKAGES=true ;;
-        s) RHEL_KERNEL_STREAM="$OPTARG" ;;
-        t) RT_KERNEL=true ;;
-        \?) usage; exit 1 ;;
-    esac
-done
+main ()
+{
+    # Ensure required environment variables are set.
+    if [[ -z "${KERNEL_SRC_DIR}" || -z "${KERNEL_BUILD_DIR}" ]]; then
+        echo "${RED}${BOLD}"
+        echo "Error: KERNEL_SRC_DIR and KERNEL_BUILD_DIR not set."
+        echo "${NORMAL}"
+        exit 1
+    else
+        echo ""
+        echo "${WHITE}KERNEL_SRC_DIR =   ${CYAN}${KERNEL_SRC_DIR}${NORMAL}"
+        echo "${WHITE}KERNEL_BUILD_DIR = ${CYAN}${KERNEL_BUILD_DIR}"
+        echo "${NORMAL}"
+    fi
 
-# Ensure required environment variables are set.
-if [[ -z "${KERNEL_SRC_DIR}" || -z "${KERNEL_BUILD_DIR}" ]]; then
-    echo "${RED}${BOLD}"
-    echo "Error: KERNEL_SRC_DIR and KERNEL_BUILD_DIR not set."
-    echo "${NORMAL}"
-    exit 1
-else
-    echo ""
-    echo "${WHITE}KERNEL_SRC_DIR =   ${CYAN}${KERNEL_SRC_DIR}${NORMAL}"
-    echo "${WHITE}KERNEL_BUILD_DIR = ${CYAN}${KERNEL_BUILD_DIR}"
-    echo "${NORMAL}"
-fi
+    parse_args "$@"
 
-check_required_commands
+    check_required_commands
 
-set_target_architecture
+    set_target_architecture
 
-# Clone the CentOS Stream kernel source repository.
-if [[ "${GIT_CLONE}" == true ]]; then
-    clone_kernel_repos
-fi
+    # Clone the CentOS Stream kernel source repository.
+    if [[ "${GIT_CLONE}" == true ]]; then
+        clone_kernel_repos
+    fi
 
-# Change directory to the kernel source directory.
-if [[ -d "${KERNEL_SRC_DIR}" ]]; then
-    cd "${KERNEL_SRC_DIR}" || exit 1
-else
-    echo "${RED}${BOLD}"
-    echo "Error: KERNEL_SRC_DIR does not exist: ${BRIGHT_BLUE}${BOLD}${KERNEL_SRC_DIR}"
-    echo "${NORMAL}"
-    exit 1
-fi
+    # Prepare for backporting.
+    if [[ "${BACKPORTING}" == "true" && ( "${LINUX_REPO}" == "stable" || "${LINUX_REPO}" == "next" ) ]]; then
+        prepare_for_backporting
+    fi
 
-# Configure the kernel.
-if [[ "${CONFIGURE}" == "true" ]]; then
-    configure_kernel
-fi
+    # Change directory to the kernel source directory.
+    if [[ -d "${KERNEL_SRC_DIR}" ]]; then
+        cd "${KERNEL_SRC_DIR}" || exit 1
+    else
+        echo "${RED}${BOLD}"
+        echo "Error: KERNEL_SRC_DIR does not exist: ${BRIGHT_BLUE}${BOLD}${KERNEL_SRC_DIR}"
+        echo "${NORMAL}"
+        exit 1
+    fi
 
-# Apply patches
-if [[ -n "${PATCHES_DIR}" && -d "${PATCHES_DIR}" ]]; then
-    apply_kernel_patches
-fi
+    # Configure the kernel.
+    if [[ "${CONFIGURE}" == "true" ]]; then
+        configure_kernel
+        generate_ctags
+    fi
 
-# If this is an Orin Nano, set for performance mode.
-if grep -q "Orin Nano" /sys/firmware/devicetree/base/model; then
-    echo "${WHITE}Setting for performance mode on Orin Nano..."
-    echo "${NORMAL}"
-    sudo cpupower frequency-set -g performance > /dev/null 2>&1
-fi
+    # Apply patches
+    if [[ -n "${PATCHES_DIR}" && -d "${PATCHES_DIR}" ]]; then
+        apply_kernel_patches
+    fi
 
-create_log_file
+    # Build the kernel
+    if [[ "${BUILD_KERNEL}" == "true" ]]; then
+        if [[ "${CONFIGURE}" != true ]]; then
+            echo "${RED}${BOLD}Error: You must configure the kernel first (use -c) before building.${NORMAL}"
+            exit 1
+        fi
 
-START_TIME=$(date +%s)
+        # If this is an Orin Nano, set for performance mode.
+        if grep -q "Orin Nano" /sys/firmware/devicetree/base/model; then
+            echo "${WHITE}Setting for performance mode on Orin Nano..."
+            echo "${NORMAL}"
+            sudo cpupower frequency-set -g performance > /dev/null 2>&1
+        fi
 
-# Remove any prior kernel images, since those are used to check build success.
-rm -f ${KERNEL_BUILD_DIR}/arch/arm64/boot/Image
-rm -f ${KERNEL_BUILD_DIR}/arch/riscv/boot/Image
-rm -f ${KERNEL_BUILD_DIR}/vmlinux
+        create_log_file
 
-build_kernel
+        # Remove any prior kernel images, since those are used to check build success.
+        rm -f "${KERNEL_BUILD_DIR}"/arch/arm64/boot/Image
+        rm -f "${KERNEL_BUILD_DIR}"/arch/riscv/boot/Image
+        rm -f "${KERNEL_BUILD_DIR}"/vmlinux
 
-# Show build results.
-echo "${WHITE}Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
-echo "${NORMAL}"
-echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec" >> "${LOG_FILE}"
-echo "//---------------------------------------------------------------" >> "${LOG_FILE}"
+        # Build the kernel.
+        START_TIME=$(date +%s)
+        BUILD_RESULT=1
+        if build_kernel; then
+            BUILD_RESULT=0
+        fi
+        END_TIME=$(date +%s)
+        BUILD_DURATION=$((END_TIME - START_TIME))
+        BUILD_MINUTES=$((BUILD_DURATION / 60))
+        BUILD_SECONDS=$((BUILD_DURATION % 60))
 
-if [[ "${BUILD_SUCCESS}" == true ]]; then
-    exit 0  # Success
-else
-    exit 1  # Failure
+        # Show build results.
+        echo "${WHITE}Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
+        echo "${NORMAL}"
+        {
+            echo "// Build time: ${BUILD_MINUTES} min, ${BUILD_SECONDS} sec"
+            echo "//---------------------------------------------------------------"
+        } >> "${LOG_FILE}"
+
+        if [[ "${BUILD_RESULT}" -ne 0 ]]; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+    exit $?
 fi
