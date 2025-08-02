@@ -347,7 +347,7 @@ prepare_for_backporting()
         git fetch -q linux-stable
     elif [[ "${LINUX_REPO}" == "next" ]]; then
         git remote add linux-next "https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git"
-        git fetch -q linux-next
+        git fetch linux-next "+refs/heads/*:refs/remotes/linux-next/*" "+refs/tags/*:refs/tags/*"
     fi
 }
 
@@ -665,8 +665,10 @@ main ()
     # Build the kernel
     if [[ "${BUILD_KERNEL}" == "true" ]]; then
         if [[ "${CONFIGURE}" != true ]]; then
-            echo "${RED}${BOLD}Error: You must configure the kernel first (use -c) before building.${NORMAL}"
-            exit 1
+            if [[ ! -f "${KERNEL_BUILD_DIR}/.config" ]]; then
+                echo "${RED}${BOLD}Error: No existing .config found in ${KERNEL_BUILD_DIR}. Run with -c to configure first.${NORMAL}"
+                exit 1
+            fi
         fi
 
         # If this is an Orin Nano, set for performance mode.
