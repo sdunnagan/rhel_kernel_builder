@@ -559,7 +559,7 @@ build_kernel()
         (
             cd "${KERNEL_SRC_DIR}" &&
             make -j"$(nproc)" O="${KERNEL_BUILD_DIR}" binrpm-pkg >> "${LOG_FILE}" 2>&1
-            cp "${KERNEL_BUILD_DIR}/rpmbuild/RPMS/${TARGET_ARCH}"/*.rpm "${KERNEL_BUILD_DIR}" 2>/dev/null || true
+            cp "$HOME/rpmbuild/RPMS/${TARGET_ARCH}"/*.rpm "${KERNEL_BUILD_DIR}" 2>/dev/null || true
         )
         BUILD_EXIT_STATUS=$?
     fi
